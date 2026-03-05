@@ -5179,12 +5179,16 @@ typedef struct MergeWriterStruct {
   PgenVariant pgv_readbuf;
 
   uintptr_t* unlocked_set;
-  // "--merge-mode nm-match" only
+  // "--merge-mode nm-match" and "--merge-mode nm-nonref-match" only
   uintptr_t* unlocked_missing_set;
 
-  // "--merge-mode nm-match"-specific temporary buffers
+  // "--merge-mode nm-match"/"nm-nonref-match"-specific temporary buffers
   uintptr_t* clobber_sample_span;
   uintptr_t* unlocked_nonmissing_sample_span;
+
+  // "--merge-mode nm-nonref-match" only: tracks samples promoted from
+  // hom-ref to non-ref in the current comparison iteration.
+  uintptr_t* promoted_set;
 
   // Buffers supporting efficient clobber when only some of the currently-read
   // samples qualify.
@@ -5305,7 +5309,7 @@ PglErr MergePgenVariantNoTmpLocked(SamePosPvarRecord** same_id_records, const Al
           if (merge_mode == kMergeModeNmFirst) {
             unlocked_ct = PopcountWords(missingness, write_sample_ctl);
           } else {
-            // kMergeModeNmMatch
+            // kMergeModeNmMatch or kMergeModeNmNonrefMatch
             SetAllBits(write_sample_ct, mwp->unlocked_set);
             unlocked_ct = write_sample_ct;
           }
@@ -5476,7 +5480,7 @@ PglErr MergePgenVariantNoTmpLocked(SamePosPvarRecord** same_id_records, const Al
             if (merge_mode == kMergeModeNmFirst) {
               unlocked_ct = PopcountWords(missingness, write_sample_ctl);
             } else {
-              // kMergeModeNmMatch
+              // kMergeModeNmMatch or kMergeModeNmNonrefMatch
               SetAllBits(write_sample_ct, mwp->unlocked_set);
               unlocked_ct = write_sample_ct;
             }
@@ -5785,7 +5789,7 @@ PglErr MergePgenVariantNoTmpLocked(SamePosPvarRecord** same_id_records, const Al
         BitvecAndCopy(unlocked_missing_set, sample_span, write_sample_ctl, clobber_sample_span);
         clobber_sample_ct = PopcountWords(clobber_sample_span, write_sample_ctl);
       }
-      if ((merge_mode == kMergeModeNmMatch) && (clobber_sample_ct != read_sample_ct)) {
+      if (((merge_mode == kMergeModeNmMatch) || (merge_mode == kMergeModeNmNonrefMatch)) && (clobber_sample_ct != read_sample_ct)) {
         // Need to scan some samples for conflicts (clearing unlocked_set bit
         // whenever one exists), and maybe clobber some others.
         // Number of samples involved is likely to be a large fraction of
@@ -5834,14 +5838,55 @@ PglErr MergePgenVariantNoTmpLocked(SamePosPvarRecord** same_id_records, const Al
           } while (geno_word);
         }
         Halfword* compare_mask_hwalias = R_CAST(Halfword*, compare_mask);
-        for (uint32_t widx = 0; widx != write_sample_ctl2; ++widx) {
-          Halfword compare_mask_hw = compare_mask_hwalias[widx];
-          if (!compare_mask_hw) {
-            continue;
+        if (merge_mode == kMergeModeNmNonrefMatch) {
+          // nm-nonref-match: when a conflict is between hom-ref (00) and a
+          // non-ref genotype (01 or 10), the non-ref call wins.  Only a
+          // conflict between two different non-ref genotypes is treated as a
+          // true conflict (which sets the genotype to missing).
+          Halfword* promoted_hwalias = R_CAST(Halfword*, mwp->promoted_set);
+          for (uint32_t widx = 0; widx != write_sample_ctl2; ++widx) {
+            Halfword compare_mask_hw = compare_mask_hwalias[widx];
+            if (!compare_mask_hw) {
+              promoted_hwalias[widx] = 0;
+              continue;
+            }
+            const uintptr_t r_geno = r_genovec[widx];
+            const uintptr_t w_geno = genovec[widx];
+            const uintptr_t diff_bits = r_geno ^ w_geno;
+            const uintptr_t any_diff = (diff_bits | (diff_bits >> 1)) & kMask5555;
+            if (!any_diff) {
+              promoted_hwalias[widx] = 0;
+              continue;
+            }
+            // Restrict to samples actually in compare_mask.
+            const uintptr_t compare_expanded = UnpackHalfwordToWord(compare_mask_hw);
+            const uintptr_t any_diff_in_mask = any_diff & compare_expanded;
+            // Identify which samples are non-ref (any bit set in their nyp).
+            const uintptr_t w_is_nonref = (w_geno | (w_geno >> 1)) & kMask5555;
+            const uintptr_t r_is_nonref = (r_geno | (r_geno >> 1)) & kMask5555;
+            // True conflict: both are non-ref and they differ.
+            const uintptr_t true_conflict = any_diff_in_mask & w_is_nonref & r_is_nonref;
+            const Halfword true_conflict_hw = PackWordToHalfwordMask5555(true_conflict | (true_conflict << 1));
+            compare_mask_hwalias[widx] = compare_mask_hw & (~true_conflict_hw);
+            // Promote: w is ref (00) and r is non-ref -> update genovec to r.
+            const uintptr_t promote_mask = any_diff_in_mask & (~w_is_nonref) & r_is_nonref;
+            if (promote_mask) {
+              const uintptr_t promote_full = promote_mask | (promote_mask << 1);
+              genovec[widx] = (w_geno & ~promote_full) | (r_geno & promote_full);
+            }
+            promoted_hwalias[widx] = PackWordToHalfwordMask5555(promote_mask | (promote_mask << 1));
+            // Case: w is non-ref, r is ref -> keep w, no action needed.
           }
-          const uintptr_t diff_bits = r_genovec[widx] ^ genovec[widx];
-          const Halfword diff_hw = PackWordToHalfwordMask5555(diff_bits | (diff_bits >> 1));
-          compare_mask_hwalias[widx] = compare_mask_hw & (~diff_hw);
+        } else {
+          for (uint32_t widx = 0; widx != write_sample_ctl2; ++widx) {
+            Halfword compare_mask_hw = compare_mask_hwalias[widx];
+            if (!compare_mask_hw) {
+              continue;
+            }
+            const uintptr_t diff_bits = r_genovec[widx] ^ genovec[widx];
+            const Halfword diff_hw = PackWordToHalfwordMask5555(diff_bits | (diff_bits >> 1));
+            compare_mask_hwalias[widx] = compare_mask_hw & (~diff_hw);
+          }
         }
         // possible todo: check if performance gain from switching to single
         // compare+clobber loops is significant
@@ -5861,6 +5906,9 @@ PglErr MergePgenVariantNoTmpLocked(SamePosPvarRecord** same_id_records, const Al
             AlleleCode* r_patch_01_dense = compare_pgvp->patch_01_vals;
             ZeroWArr(write_sample_ctl, r_patch_01_set);
             PermuteUpdate8bitDenseFromSparse(pgvp->patch_01_set, pgvp->patch_01_vals, old_sample_idx_to_new, read_sample_ct, pgvp->patch_01_ct, r_patch_01_set, r_patch_01_dense);
+            if (mwp->promoted_set) {
+              Update8bitDense(mwp->promoted_set, r_patch_01_set, r_patch_01_dense, write_sample_ctl, patch_01_set, patch_01_dense);
+            }
             Compare8bitDense(r_patch_01_set, r_patch_01_dense, patch_01_set, patch_01_dense, write_sample_ctl, compare_mask);
             if (clobber_sample_ct) {
               Update8bitDense(clobber_sample_span, r_patch_01_set, r_patch_01_dense, write_sample_ctl, patch_01_set, patch_01_dense);
@@ -5876,6 +5924,9 @@ PglErr MergePgenVariantNoTmpLocked(SamePosPvarRecord** same_id_records, const Al
             AlleleCode* r_patch_10_dense = compare_pgvp->patch_10_vals;
             ZeroWArr(write_sample_ctl, r_patch_10_set);
             PermuteUpdate16bitDenseFromSparse(pgvp->patch_10_set, pgvp->patch_10_vals, old_sample_idx_to_new, read_sample_ct, pgvp->patch_10_ct, r_patch_10_set, r_patch_10_dense);
+            if (mwp->promoted_set) {
+              Update16bitDense(mwp->promoted_set, r_patch_10_set, r_patch_10_dense, write_sample_ctl, patch_10_set, patch_10_dense);
+            }
             Compare16bitDense(r_patch_10_set, r_patch_10_dense, patch_10_set, patch_10_dense, write_sample_ctl, compare_mask);
             if (clobber_sample_ct) {
               Update16bitDense(clobber_sample_span, r_patch_10_set, r_patch_10_dense, write_sample_ctl, patch_10_set, patch_10_dense);
@@ -5889,6 +5940,20 @@ PglErr MergePgenVariantNoTmpLocked(SamePosPvarRecord** same_id_records, const Al
             uintptr_t* r_phasepresent = compare_pgvp->phasepresent;
             uintptr_t* r_phaseinfo = compare_pgvp->phaseinfo;
             CopyAndPermuteHphase(pgvp->phasepresent, pgvp->phaseinfo, old_sample_idx_to_new, write_sample_ctl, pgvp->phasepresent_ct, r_phasepresent, r_phaseinfo);
+            // For nm-nonref-match: update phase for promoted samples (which
+            // were hom-ref and thus had no phase) before the comparison, so
+            // the comparison sees consistent data.
+            if (mwp->promoted_set) {
+              for (uint32_t widx = 0; widx != write_sample_ctl; ++widx) {
+                const uintptr_t promoted_word = mwp->promoted_set[widx];
+                if (!promoted_word) {
+                  continue;
+                }
+                // Promoted samples were ref: clear old phase, copy read's.
+                phasepresent[widx] = (phasepresent[widx] & ~promoted_word) | (r_phasepresent[widx] & promoted_word);
+                phaseinfo[widx] = (phaseinfo[widx] & ~promoted_word) | (r_phaseinfo[widx] & promoted_word);
+              }
+            }
             for (uint32_t widx = 0; widx != write_sample_ctl; ++widx) {
               uintptr_t compare_word = compare_mask[widx];
               if (!compare_word) {
@@ -5923,6 +5988,9 @@ PglErr MergePgenVariantNoTmpLocked(SamePosPvarRecord** same_id_records, const Al
             uint16_t* r_dosage_dense = compare_pgvp->dosage_main;
             ZeroWArr(write_sample_ctl, r_dosage_present);
             PermuteUpdate16bitDenseFromSparse(pgvp->dosage_present, pgvp->dosage_main, old_sample_idx_to_new, read_sample_ct, pgvp->dosage_ct, r_dosage_present, r_dosage_dense);
+            if (mwp->promoted_set) {
+              Update16bitDense(mwp->promoted_set, r_dosage_present, r_dosage_dense, write_sample_ctl, dosage_present, dosage_dense);
+            }
             Compare16bitDense(r_dosage_present, r_dosage_dense, dosage_present, dosage_dense, write_sample_ctl, compare_mask);
             if (clobber_sample_ct) {
               Update16bitDense(clobber_sample_span, r_dosage_present, r_dosage_dense, write_sample_ctl, dosage_present, dosage_dense);
@@ -5936,6 +6004,9 @@ PglErr MergePgenVariantNoTmpLocked(SamePosPvarRecord** same_id_records, const Al
               int16_t* r_dphase_dense = compare_pgvp->dphase_delta;
               ZeroWArr(write_sample_ctl, r_dphase_present);
               PermuteUpdate16bitDenseFromSparse(pgvp->dphase_present, pgvp->dphase_delta, old_sample_idx_to_new, read_sample_ct, pgvp->dphase_ct, r_dphase_present, r_dphase_dense);
+              if (mwp->promoted_set) {
+                Update16bitDense(mwp->promoted_set, r_dphase_present, r_dphase_dense, write_sample_ctl, dphase_present, dphase_dense);
+              }
               Compare16bitDense(r_dphase_present, r_dphase_dense, dphase_present, dphase_dense, write_sample_ctl, compare_mask);
               if (clobber_sample_ct) {
                 Update16bitDense(clobber_sample_span, r_dphase_present, r_dphase_dense, write_sample_ctl, dosage_present, dosage_dense);
@@ -6097,7 +6168,7 @@ PglErr MergePgenVariantNoTmpLocked(SamePosPvarRecord** same_id_records, const Al
         }
       }
     }
-    if (merge_mode == kMergeModeNmMatch) {
+    if ((merge_mode == kMergeModeNmMatch) || (merge_mode == kMergeModeNmNonrefMatch)) {
       const Halfword* unlocked_set_hwalias = R_CAST(Halfword*, unlocked_set);
       for (uint32_t widx = 0; widx != write_sample_ctl2; ++widx) {
         const Halfword locked_hw = ~unlocked_set_hwalias[widx];
@@ -6516,11 +6587,17 @@ PglErr PmergeConcat(const PmergeInfo* pmip, const SampleIdInfo* siip, const ChrI
     mw.unlocked_missing_set = nullptr;
     mw.clobber_sample_span = nullptr;
     mw.unlocked_nonmissing_sample_span = nullptr;
-    if (pmip->merge_mode == kMergeModeNmMatch) {
+    mw.promoted_set = nullptr;
+    if ((pmip->merge_mode == kMergeModeNmMatch) || (pmip->merge_mode == kMergeModeNmNonrefMatch)) {
       if (unlikely(bigstack_alloc_w(sample_ctl, &mw.unlocked_missing_set) ||
                    bigstack_alloc_w(sample_ctl, &mw.clobber_sample_span) ||
                    bigstack_alloc_w(sample_ctl, &mw.unlocked_nonmissing_sample_span))) {
         goto PmergeConcat_ret_NOMEM;
+      }
+      if (pmip->merge_mode == kMergeModeNmNonrefMatch) {
+        if (unlikely(bigstack_alloc_w(sample_ctl, &mw.promoted_set))) {
+          goto PmergeConcat_ret_NOMEM;
+        }
       }
     }
     mw.merge_mode = pmip->merge_mode;

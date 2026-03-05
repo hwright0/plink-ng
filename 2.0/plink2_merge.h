@@ -45,7 +45,8 @@ FLAGSET_DEF_END(PmergeFlags);
 ENUM_U31_DEF_START()
   kMergeModeNmMatch,
   kMergeModeNmFirst,
-  kMergeModeFirst
+  kMergeModeFirst,
+  kMergeModeNmNonrefMatch
 ENUM_U31_DEF_END(MergeMode);
 
 ENUM_U31_DEF_START()

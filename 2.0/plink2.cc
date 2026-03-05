@@ -9389,6 +9389,8 @@ int main(int argc, char** argv) {
             pmerge_info.merge_mode = kMergeModeNmFirst;
           } else if (strequal_k(cur_modif, "first", cur_modif_slen) || strequal_k(cur_modif, "4", cur_modif_slen)) {
             pmerge_info.merge_mode = kMergeModeFirst;
+          } else if (strequal_k(cur_modif, "nm-nonref-match", cur_modif_slen)) {
+            pmerge_info.merge_mode = kMergeModeNmNonrefMatch;
           } else if (unlikely(strequal_k(cur_modif, "3", cur_modif_slen))) {
             logerrputs("Error: --merge-mode 3 discontinued.  (You can get the same results with\n--merge-mode 2 if you reverse your fileset order.)\n");
             goto main_ret_INVALID_CMDLINE_A;
