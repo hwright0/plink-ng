@@ -484,6 +484,7 @@ typedef struct Plink2CmdlineStruct {
 
   char* pginame;
   char* var_filter_exceptions_flattened;
+  char* vcf_gt_filter_exceptions_flattened;
   char* varid_template_str;
   char* varid_multi_template_str;
   char* varid_multi_nonsnp_template_str;
@@ -3484,6 +3485,53 @@ BoolErr ParseFreqSelector(const char* mode_str, const char* flagname_p, FreqFilt
 
 static_assert(sizeof(int) == sizeof(int32_t), "main() assumes int and int32_t are synonymous.");
 static_assert(!kChrOffsetX, "--autosome-num/--chr-set/--cow/etc. assume kChrOffsetX == 0.");
+// Parses a --vcf-{min,max}-{dp,lad} argument: either a single bare nonnegative
+// integer (applied to both ploidies) or up to one each of 'diploid='<int> and
+// 'haploid='<int>.  Ploidies left unspecified keep no_filter_val.  Populates
+// g_logbuf and returns 1 on error.
+BoolErr ParseVcfDepthBound(const char* const* params, uint32_t param_ct, const char* flagname_p, int32_t no_filter_val, int32_t* diploid_valp, int32_t* haploid_valp) {
+  *diploid_valp = no_filter_val;
+  *haploid_valp = no_filter_val;
+  uint32_t bare_seen = 0;
+  uint32_t keyed_seen = 0;
+  for (uint32_t pidx = 0; pidx != param_ct; ++pidx) {
+    const char* cur_modif = params[pidx];
+    const uint32_t cur_modif_slen = strlen(cur_modif);
+    const char* valstr;
+    int32_t* dstp;
+    if (StrStartsWith(cur_modif, "diploid=", cur_modif_slen)) {
+      valstr = &(cur_modif[strlen("diploid=")]);
+      dstp = diploid_valp;
+      keyed_seen = 1;
+    } else if (StrStartsWith(cur_modif, "haploid=", cur_modif_slen)) {
+      valstr = &(cur_modif[strlen("haploid=")]);
+      dstp = haploid_valp;
+      keyed_seen = 1;
+    } else {
+      uint32_t uii;
+      if (unlikely(ScanUintDefcapx(cur_modif, &uii))) {
+        snprintf(g_logbuf, kLogbufSize, "Error: Invalid --%s argument '%s'.\n", flagname_p, cur_modif);
+        return 1;
+      }
+      *diploid_valp = uii;
+      *haploid_valp = uii;
+      bare_seen = 1;
+      continue;
+    }
+    uint32_t uii;
+    if (unlikely(ScanUintDefcapx(valstr, &uii))) {
+      snprintf(g_logbuf, kLogbufSize, "Error: Invalid --%s argument '%s'.\n", flagname_p, cur_modif);
+      return 1;
+    }
+    *dstp = uii;
+  }
+  if (unlikely(bare_seen && (keyed_seen || (param_ct != 1)))) {
+    snprintf(g_logbuf, kLogbufSize, "Error: --%s expects either a single value or 'diploid='/'haploid=' modifier(s).\n", flagname_p);
+    return 1;
+  }
+  return 0;
+}
+
 static_assert(kChrOffsetY == 1, "--chr-set/--cow/... assume kChrOffsetY == 1.");
 static_assert(kChrOffsetXY == 2, "--chr-set/--cow/... assume kChrOffsetXY == 2.");
 static_assert(kChrOffsetMT == 3, "--chr-set/--cow/... assume kChrOffsetMT == 3.");
@@ -3548,6 +3596,7 @@ int main(int argc, char** argv) {
   pc.load_filter_log_flags = kfLoadFilterLog0;
   pc.pginame = nullptr;
   pc.var_filter_exceptions_flattened = nullptr;
+  pc.vcf_gt_filter_exceptions_flattened = nullptr;
   pc.varid_template_str = nullptr;
   pc.varid_multi_template_str = nullptr;
   pc.varid_multi_nonsnp_template_str = nullptr;
@@ -4037,6 +4086,13 @@ int main(int argc, char** argv) {
     int32_t vcf_min_gq = -1;
     int32_t vcf_min_dp = -1;
     int32_t vcf_max_dp = 0x7fffffff;
+    int32_t vcf_min_dp_haploid = -1;
+    int32_t vcf_max_dp_haploid = 0x7fffffff;
+    int32_t vcf_min_lad = -1;
+    int32_t vcf_max_lad = 0x7fffffff;
+    int32_t vcf_min_lad_haploid = -1;
+    int32_t vcf_max_lad_haploid = 0x7fffffff;
+    uint32_t vcf_gt_filter = 0;
     uintptr_t malloc_size_mib = 0;
     LoadParams load_params = kfLoadParams0;
     Xload xload = kfXload0;
@@ -12381,9 +12437,9 @@ int main(int argc, char** argv) {
         } else if (unlikely(strequal_k_unsafe(flagname_p2, "cf-min-gp"))) {
           logerrputs("Error: --vcf-min-gp is no longer supported.  Use --import-dosage-certainty\ninstead.\n");
           goto main_ret_INVALID_CMDLINE_A;
-        } else if (strequal_k_unsafe(flagname_p2, "cf-min-gq") || strequal_k_unsafe(flagname_p2, "cf-min-dp")) {
+        } else if (strequal_k_unsafe(flagname_p2, "cf-min-gq")) {
           if (unlikely(!(xload & (kfXloadVcf | kfXloadBcf)))) {
-            logerrprintf("Error: --%s must be used with --vcf/--bcf.\n", flagname_p);
+            logerrputs("Error: --vcf-min-gq must be used with --vcf/--bcf.\n");
             goto main_ret_INVALID_CMDLINE;
           }
           if (unlikely(EnforceParamCtRange(argvk[arg_idx], param_ct, 1, 1))) {
@@ -12392,33 +12448,82 @@ int main(int argc, char** argv) {
           const char* cur_modif = argvk[arg_idx + 1];
           uint32_t uii;
           if (unlikely(ScanUintDefcapx(cur_modif, &uii))) {
-            snprintf(g_logbuf, kLogbufSize, "Error: Invalid --%s argument '%s'.\n", flagname_p, cur_modif);
+            snprintf(g_logbuf, kLogbufSize, "Error: Invalid --vcf-min-gq argument '%s'.\n", cur_modif);
             goto main_ret_INVALID_CMDLINE_WWA;
           }
-          if (flagname_p2[7] == 'g') {
-            vcf_min_gq = uii;
-          } else {
-            vcf_min_dp = uii;
-            if (vcf_max_dp < vcf_min_dp) {
-              logerrputs("Error: --vcf-min-dp value cannot be larger than --vcf-max-dp value.\n");
-              goto main_ret_INVALID_CMDLINE;
-            }
+          vcf_min_gq = uii;
+        } else if (strequal_k_unsafe(flagname_p2, "cf-min-dp")) {
+          if (unlikely(!(xload & (kfXloadVcf | kfXloadBcf)))) {
+            logerrputs("Error: --vcf-min-dp must be used with --vcf/--bcf.\n");
+            goto main_ret_INVALID_CMDLINE;
+          }
+          if (unlikely(EnforceParamCtRange(argvk[arg_idx], param_ct, 1, 2))) {
+            goto main_ret_INVALID_CMDLINE_2A;
+          }
+          if (unlikely(ParseVcfDepthBound(&(argvk[arg_idx + 1]), param_ct, flagname_p, -1, &vcf_min_dp, &vcf_min_dp_haploid))) {
+            goto main_ret_INVALID_CMDLINE_WWA;
+          }
+          if (unlikely((vcf_max_dp < vcf_min_dp) || (vcf_max_dp_haploid < vcf_min_dp_haploid))) {
+            logerrputs("Error: --vcf-min-dp value cannot be larger than the corresponding --vcf-max-dp\nvalue.\n");
+            goto main_ret_INVALID_CMDLINE;
           }
         } else if (strequal_k_unsafe(flagname_p2, "cf-max-dp")) {
           if (unlikely(!(xload & (kfXloadVcf | kfXloadBcf)))) {
             logerrputs("Error: --vcf-max-dp must be used with --vcf/--bcf.\n");
             goto main_ret_INVALID_CMDLINE;
           }
-          if (unlikely(EnforceParamCtRange(argvk[arg_idx], param_ct, 1, 1))) {
+          if (unlikely(EnforceParamCtRange(argvk[arg_idx], param_ct, 1, 2))) {
             goto main_ret_INVALID_CMDLINE_2A;
           }
-          const char* cur_modif = argvk[arg_idx + 1];
-          uint32_t uii;
-          if (unlikely(ScanUintDefcapx(cur_modif, &uii))) {
-            snprintf(g_logbuf, kLogbufSize, "Error: Invalid --vcf-max-dp argument '%s'.\n", cur_modif);
+          if (unlikely(ParseVcfDepthBound(&(argvk[arg_idx + 1]), param_ct, flagname_p, 0x7fffffff, &vcf_max_dp, &vcf_max_dp_haploid))) {
             goto main_ret_INVALID_CMDLINE_WWA;
           }
-          vcf_max_dp = uii;
+          if (unlikely((vcf_max_dp < vcf_min_dp) || (vcf_max_dp_haploid < vcf_min_dp_haploid))) {
+            logerrputs("Error: --vcf-min-dp value cannot be larger than the corresponding --vcf-max-dp\nvalue.\n");
+            goto main_ret_INVALID_CMDLINE;
+          }
+        } else if (strequal_k_unsafe(flagname_p2, "cf-min-lad")) {
+          if (unlikely(!(xload & kfXloadVcf))) {
+            logerrputs("Error: --vcf-min-lad must be used with --vcf.\n");
+            goto main_ret_INVALID_CMDLINE;
+          }
+          if (unlikely(EnforceParamCtRange(argvk[arg_idx], param_ct, 1, 2))) {
+            goto main_ret_INVALID_CMDLINE_2A;
+          }
+          if (unlikely(ParseVcfDepthBound(&(argvk[arg_idx + 1]), param_ct, flagname_p, -1, &vcf_min_lad, &vcf_min_lad_haploid))) {
+            goto main_ret_INVALID_CMDLINE_WWA;
+          }
+          if (unlikely((vcf_max_lad < vcf_min_lad) || (vcf_max_lad_haploid < vcf_min_lad_haploid))) {
+            logerrputs("Error: --vcf-min-lad value cannot be larger than the corresponding\n--vcf-max-lad value.\n");
+            goto main_ret_INVALID_CMDLINE;
+          }
+        } else if (strequal_k_unsafe(flagname_p2, "cf-max-lad")) {
+          if (unlikely(!(xload & kfXloadVcf))) {
+            logerrputs("Error: --vcf-max-lad must be used with --vcf.\n");
+            goto main_ret_INVALID_CMDLINE;
+          }
+          if (unlikely(EnforceParamCtRange(argvk[arg_idx], param_ct, 1, 2))) {
+            goto main_ret_INVALID_CMDLINE_2A;
+          }
+          if (unlikely(ParseVcfDepthBound(&(argvk[arg_idx + 1]), param_ct, flagname_p, 0x7fffffff, &vcf_max_lad, &vcf_max_lad_haploid))) {
+            goto main_ret_INVALID_CMDLINE_WWA;
+          }
+          if (unlikely((vcf_max_lad < vcf_min_lad) || (vcf_max_lad_haploid < vcf_min_lad_haploid))) {
+            logerrputs("Error: --vcf-min-lad value cannot be larger than the corresponding\n--vcf-max-lad value.\n");
+            goto main_ret_INVALID_CMDLINE;
+          }
+        } else if (strequal_k_unsafe(flagname_p2, "cf-gt-filter")) {
+          if (unlikely(!(xload & kfXloadVcf))) {
+            logerrputs("Error: --vcf-gt-filter must be used with --vcf.\n");
+            goto main_ret_INVALID_CMDLINE;
+          }
+          if (param_ct) {
+            reterr = AllocAndFlatten(&(argvk[arg_idx + 1]), flagname_p, param_ct, 0x7fffffff, &pc.vcf_gt_filter_exceptions_flattened);
+            if (unlikely(reterr)) {
+              goto main_ret_1;
+            }
+          }
+          vcf_gt_filter = 1;
         } else if (strequal_k_unsafe(flagname_p2, "cf-half-call")) {
           if (unlikely(!(xload & (kfXloadVcf | kfXloadBcf)))) {
             logerrputs("Error: --vcf-half-call must be used with --vcf/--bcf.\n");
@@ -12468,6 +12573,13 @@ int main(int argc, char** argv) {
             goto main_ret_INVALID_CMDLINE;
           }
           import_flags |= kfImportVcfAllowNoNonvar;
+          goto main_param_zero;
+        } else if (strequal_k_unsafe(flagname_p2, "cf-allow-no-vars")) {
+          if (unlikely(!(xload & kfXloadVcf))) {
+            logerrputs("Error: --vcf-allow-no-vars must be used with --vcf.\n");
+            goto main_ret_INVALID_CMDLINE;
+          }
+          import_flags |= kfImportVcfAllowNoVars;
           goto main_param_zero;
         } else if (strequal_k_unsafe(flagname_p2, "if")) {
           if (unlikely(!(pc.command_flags1 & kfCommand1Glm))) {
@@ -13209,8 +13321,24 @@ int main(int argc, char** argv) {
             g_zst_level = 1;
           }
           if (is_vcf) {
-            reterr = VcfToPgen(pgenname, (load_params & kfLoadParamsPsam)? psamname : nullptr, const_fid, vcf_dosage_import_field, missing_varid, pc.misc_flags, import_flags, load_filter_log_import_flags, no_samples_ok, is_update_or_impute_sex, !!pc.splitpar_bound2, pc.sort_vars_mode > kSortNone, pc.hard_call_thresh, pc.dosage_erase_thresh, import_dosage_certainty, id_delim, idspace_to, vcf_min_gq, vcf_min_dp, vcf_max_dp, vcf_half_call, pc.fam_cols, import_max_allele_ct, import_overlong_varids_mode, pc.max_thread_ct, outname, convname_end, &chr_info, &pgen_generated, &psam_generated);
+            VcfImportQcInfo vcf_qc_info;
+            vcf_qc_info.min_gq = vcf_min_gq;
+            vcf_qc_info.min_dp = vcf_min_dp;
+            vcf_qc_info.max_dp = vcf_max_dp;
+            vcf_qc_info.min_dp_haploid = vcf_min_dp_haploid;
+            vcf_qc_info.max_dp_haploid = vcf_max_dp_haploid;
+            vcf_qc_info.min_lad = vcf_min_lad;
+            vcf_qc_info.max_lad = vcf_max_lad;
+            vcf_qc_info.min_lad_haploid = vcf_min_lad_haploid;
+            vcf_qc_info.max_lad_haploid = vcf_max_lad_haploid;
+            vcf_qc_info.ft_filter = vcf_gt_filter;
+            vcf_qc_info.ft_exceptions = pc.vcf_gt_filter_exceptions_flattened;
+            reterr = VcfToPgen(pgenname, (load_params & kfLoadParamsPsam)? psamname : nullptr, const_fid, vcf_dosage_import_field, missing_varid, pc.misc_flags, import_flags, load_filter_log_import_flags, no_samples_ok, is_update_or_impute_sex, !!pc.splitpar_bound2, pc.sort_vars_mode > kSortNone, pc.hard_call_thresh, pc.dosage_erase_thresh, import_dosage_certainty, id_delim, idspace_to, &vcf_qc_info, vcf_half_call, pc.fam_cols, import_max_allele_ct, import_overlong_varids_mode, pc.max_thread_ct, outname, convname_end, &chr_info, &pgen_generated, &psam_generated);
           } else {
+            if (unlikely((vcf_min_dp_haploid != vcf_min_dp) || (vcf_max_dp_haploid != vcf_max_dp))) {
+              logerrputs("Error: --vcf-min-dp/--vcf-max-dp 'haploid='/'diploid=' modifiers are not\nsupported with --bcf yet.\n");
+              goto main_ret_INVALID_CMDLINE;
+            }
             reterr = BcfToPgen(pgenname, (load_params & kfLoadParamsPsam)? psamname : nullptr, const_fid, vcf_dosage_import_field, missing_varid, pc.misc_flags, import_flags, load_filter_log_import_flags, no_samples_ok, is_update_or_impute_sex, !!pc.splitpar_bound2, pc.sort_vars_mode > kSortNone, pc.hard_call_thresh, pc.dosage_erase_thresh, import_dosage_certainty, id_delim, idspace_to, vcf_min_gq, vcf_min_dp, vcf_max_dp, vcf_half_call, pc.fam_cols, import_max_allele_ct, import_overlong_varids_mode, pc.max_thread_ct, outname, convname_end, &chr_info, &pgen_generated, &psam_generated);
           }
           g_zst_level = zst_level;
@@ -13249,6 +13377,11 @@ int main(int argc, char** argv) {
             logerrputs("Error: Invalid input flag combination.\n");
             goto main_ret_INVALID_CMDLINE;
           }
+        }
+        if (reterr == kPglRetSkipped) {
+          // --vcf-allow-no-vars: warning already emitted, exit successfully.
+          reterr = kPglRetSuccess;
+          goto main_ret_1;
         }
         if (reterr || (!pc.command_flags1)) {
           goto main_ret_1;
@@ -13510,6 +13643,7 @@ int main(int argc, char** argv) {
   free_cond(pc.varid_multi_template_str);
   free_cond(pc.varid_template_str);
   free_cond(pc.var_filter_exceptions_flattened);
+  free_cond(pc.vcf_gt_filter_exceptions_flattened);
   free_cond(pc.pginame);
   if (file_delete_list) {
     do {

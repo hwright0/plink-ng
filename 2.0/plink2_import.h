@@ -86,13 +86,30 @@ typedef struct GenDummyInfoStruct {
   double dosage_freq;
 } GenDummyInfo;
 
+// Per-genotype quality-control parameters for --vcf import.  DP and LAD have
+// separate diploid/haploid thresholds (haploid calls have ~half the expected
+// depth).  min_* == -1 and max_* == 0x7fffffff mean "no filter".
+typedef struct VcfImportQcInfoStruct {
+  int32_t min_gq;
+  int32_t min_dp;
+  int32_t max_dp;
+  int32_t min_dp_haploid;
+  int32_t max_dp_haploid;
+  int32_t min_lad;
+  int32_t max_lad;
+  int32_t min_lad_haploid;
+  int32_t max_lad_haploid;
+  uint32_t ft_filter;  // whether --vcf-gt-filter is active
+  const char* ft_exceptions;  // \0\0-terminated extra-pass FT values, or nullptr
+} VcfImportQcInfo;
+
 void InitPlink1Dosage(Plink1DosageInfo* plink1_dosage_info_ptr);
 
 void InitGenDummy(GenDummyInfo* gendummy_info_ptr);
 
 void CleanupGenDummy(GenDummyInfo* gendummy_info_ptr);
 
-PglErr VcfToPgen(const char* vcfname, const char* preexisting_psamname, const char* const_fid, const char* dosage_import_field, const char* missing_varid, MiscFlags misc_flags, ImportFlags import_flags, LoadFilterLogFlags load_filter_log_import_flags, uint32_t no_samples_ok, uint32_t is_update_or_impute_sex, uint32_t is_splitpar, uint32_t is_sortvars, uint32_t hard_call_thresh, uint32_t dosage_erase_thresh, double import_dosage_certainty, char id_delim, char idspace_to, int32_t vcf_min_gq, int32_t vcf_min_dp, int32_t vcf_max_dp, VcfHalfCall halfcall_mode, FamCol fam_cols, uint32_t import_max_allele_ct, ImportOverlongVarIdsMode overlong_varids_mode, uint32_t max_thread_ct, char* outname, char* outname_end, ChrInfo* cip, uint32_t* pgen_generated_ptr, uint32_t* psam_generated_ptr);
+PglErr VcfToPgen(const char* vcfname, const char* preexisting_psamname, const char* const_fid, const char* dosage_import_field, const char* missing_varid, MiscFlags misc_flags, ImportFlags import_flags, LoadFilterLogFlags load_filter_log_import_flags, uint32_t no_samples_ok, uint32_t is_update_or_impute_sex, uint32_t is_splitpar, uint32_t is_sortvars, uint32_t hard_call_thresh, uint32_t dosage_erase_thresh, double import_dosage_certainty, char id_delim, char idspace_to, const VcfImportQcInfo* vcf_qc_infop, VcfHalfCall halfcall_mode, FamCol fam_cols, uint32_t import_max_allele_ct, ImportOverlongVarIdsMode overlong_varids_mode, uint32_t max_thread_ct, char* outname, char* outname_end, ChrInfo* cip, uint32_t* pgen_generated_ptr, uint32_t* psam_generated_ptr);
 
 PglErr BcfToPgen(const char* bcfname, const char* preexisting_psamname, const char* const_fid, const char* dosage_import_field, const char* missing_varid, MiscFlags misc_flags, ImportFlags import_flags, LoadFilterLogFlags load_filter_log_import_flags, uint32_t no_samples_ok, uint32_t is_update_or_impute_sex, uint32_t is_splitpar, uint32_t is_sortvars, uint32_t hard_call_thresh, uint32_t dosage_erase_thresh, double import_dosage_certainty, char id_delim, char idspace_to, int32_t vcf_min_gq, int32_t vcf_min_dp, int32_t vcf_max_dp, VcfHalfCall halfcall_mode, FamCol fam_cols, uint32_t import_max_allele_ct, ImportOverlongVarIdsMode overlong_varids_mode, uint32_t max_thread_ct, char* outname, char* outname_end, ChrInfo* cip, uint32_t* pgen_generated_ptr, uint32_t* psam_generated_ptr);
 

@@ -1824,12 +1824,23 @@ PglErr DispHelp(const char* const* argvk, uint32_t param_ct) {
 "  --iid-sid           : Make --id-delim, --indv, and --sample-diff interpret\n"
 "                        two-token sample IDs as IID-SID instead of FID-IID.\n"
               );
-    HelpPrint("vcf\0bcf\0vcf-half-call\0vcf-min-gq\0vcf-min-dp\0vcf-max-dp\0vcf-require-gt\0vcf-ploidy\0vcf-ref-n-missing\0", &help_ctrl, 0,
+    HelpPrint("vcf\0bcf\0vcf-half-call\0vcf-min-gq\0vcf-min-dp\0vcf-max-dp\0vcf-min-lad\0vcf-max-lad\0vcf-gt-filter\0vcf-require-gt\0vcf-ploidy\0vcf-ref-n-missing\0", &help_ctrl, 0,
 "  --vcf-require-gt    : Skip variants with no GT field.\n"
 "  --vcf-min-gq <val>  : No-call genotypes when GQ is present and below the\n"
 "                        threshold.\n"
-"  --vcf-max-dp <val>  : No-call genotypes when DP is present and above/below\n"
-"  --vcf-min-dp <val>    the threshold.\n"
+"  --vcf-max-dp <val...> : No-call genotypes when DP is present and above/below\n"
+"  --vcf-min-dp <val...>   the threshold.  In place of a single value, you can\n"
+"                          give 'diploid='<val> and/or 'haploid='<val> to set\n"
+"                          separate thresholds for diploid and haploid genotype\n"
+"                          calls (haploid calls, e.g. male chrX/chrY and chrM,\n"
+"                          have roughly half the expected depth).\n"
+"  --vcf-max-lad <val...> : Same as --vcf-{max,min}-dp, except the depth is the\n"
+"  --vcf-min-lad <val...>   sum of the comma-separated FORMAT/LAD entries (local\n"
+"                           allele depths).  'diploid='/'haploid=' modifiers are\n"
+"                           also supported.  (--vcf only.)\n"
+"  --vcf-gt-filter [val...] : No-call genotypes whose FORMAT/FT value is not\n"
+"                             'PASS' or '.'.  You can list additional FT values\n"
+"                             to keep, analogous to --var-filter.  (--vcf only.)\n"
 "  --vcf-half-call <m> : Specify how '0/.' and similar VCF GT values should be\n"
 "                        handled.  The following four modes are supported:\n"
 "                        * 'error'/'e' (default) errors out and reports line #.\n"
@@ -1847,6 +1858,11 @@ PglErr DispHelp(const char* const* argvk, uint32_t param_ct) {
 "                          properly (e.g. GATK GenotypeGVCFs was run without\n"
 "                          --include-non-variant-sites).  --vcf-allow-no-nonvar\n"
 "                          suppresses this error.\n"
+              );
+    HelpPrint("vcf\0vcf-allow-no-vars\0", &help_ctrl, 0,
+"  --vcf-allow-no-vars : Turn the \"no variants imported\" error into a\n"
+"                        warning, producing no output and exiting\n"
+"                        successfully.  (--vcf only.)\n"
               );
     HelpPrint("oxford-single-chr\0data\0gen\0bgen\0", &help_ctrl, 0,
 "  --oxford-single-chr <chr name>  : Specify single-chromosome .gen/.bgen file\n"

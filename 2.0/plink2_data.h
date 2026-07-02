@@ -75,7 +75,8 @@ FLAGSET_DEF_START()
   kfImportPolyploidExplicitError = (1 << 6),
   kfImportVcfAllowNoNonvar = (1 << 7),
   kfImportLaxBgen = (1 << 8),
-  kfImportEigNohash = (1 << 9)
+  kfImportEigNohash = (1 << 9),
+  kfImportVcfAllowNoVars = (1 << 10)
 FLAGSET_DEF_END(ImportFlags);
 
 ENUM_U31_DEF_START()

@@ -97,13 +97,26 @@ FLAGSET_DEF_START()
   kfGparseDphase = (1 << 3)
 FLAGSET_DEF_END(GparseFlags);
 
+// Per-genotype quality fields that can be checked during VCF import.  The enum
+// value doubles as the index into the file-level threshold arrays in
+// VcfQualFilterInfo (kVcfQualFt entries there are unused).
+ENUM_U31_DEF_START()
+  kVcfQualGq,   // GQ: integer, minimum only
+  kVcfQualDp,   // DP: integer, minimum and maximum
+  kVcfQualLad,  // LAD: sum of comma-separated integers, minimum and maximum
+  kVcfQualFt    // FT: passes only for "PASS"/"." or a listed exception
+ENUM_U31_DEF_END(VcfQualKind);
+
+CONSTI32(kMaxVcfQualFields, 4);
+
 typedef struct GparseReadBgenMetadataStruct {
   uint32_t input_byte_ct;
   uint32_t uncompressed_byte_ct;
 } GparseReadBgenMetadata;
 
 typedef struct GparseReadVcfMetadataStruct {
-  STD_ARRAY_DECL(uint32_t, 2, qual_field_idxs);
+  STD_ARRAY_DECL(uint32_t, kMaxVcfQualFields, qual_field_idxs);
+  STD_ARRAY_DECL(uint32_t, kMaxVcfQualFields, qual_field_kinds);
   uint16_t gt_exists;
   uint16_t qual_exists;
   uint32_t dosage_field_idx;
@@ -818,51 +831,68 @@ uint32_t GetVcfFormatPosition(const char* __restrict needle, const char* format_
   }
 }
 
-uint32_t VcfQualScanInit1(const char* format_start, const char* format_end, int32_t vcf_min_gq, int32_t vcf_min_dp, int32_t vcf_max_dp, STD_ARRAY_REF(uint32_t, 2) qual_field_idxs) {
-  uint32_t qual_exists = 0;
-  qual_field_idxs[0] = UINT32_MAX;
-  qual_field_idxs[1] = UINT32_MAX;
-  if (vcf_min_gq >= 0) {
-    qual_field_idxs[0] = GetVcfFormatPosition("GQ", format_start, format_end, 2);
-    qual_exists = (qual_field_idxs[0] != UINT32_MAX);
+// File-level configuration for the per-genotype quality checks.  DP and LAD
+// support separate diploid and haploid thresholds, since haploid calls (e.g.
+// male chrX/chrY and chrM) have roughly half the expected read depth.
+typedef struct VcfQualFilterInfoStruct {
+  // indexed by VcfQualKind; kVcfQualFt entries are unused
+  STD_ARRAY_DECL(int32_t, kMaxVcfQualFields, mins);
+  STD_ARRAY_DECL(int32_t, kMaxVcfQualFields, maxs);
+  STD_ARRAY_DECL(int32_t, kMaxVcfQualFields, haploid_mins);
+  STD_ARRAY_DECL(int32_t, kMaxVcfQualFields, haploid_maxs);
+  uint32_t ft_filter;  // whether --vcf-gt-filter is active
+  // \0-separated, \0\0-terminated list of FT values to treat as passing (in
+  // addition to "PASS" and "."); may be nullptr even when ft_filter is set
+  const char* ft_exceptions;
+} VcfQualFilterInfo;
+
+// Sums a comma-separated list of nonnegative integers (e.g. FORMAT/LAD),
+// stopping at the end of the field.  Returns 1 (failure) if the field does not
+// start with a digit (e.g. a missing '.' value), matching ScanInt32's
+// convention so that such genotypes pass the quality check.  Overflow is
+// clamped to INT32_MAX.
+BoolErr ScanVcfIntSum(const char* str_iter, int32_t* valp) {
+  if (!IsDigit(ctou32(*str_iter))) {
+    return 1;
   }
-  if ((vcf_min_dp >= 0) || (vcf_max_dp != 0x7fffffff)) {
-    qual_field_idxs[1] = GetVcfFormatPosition("DP", format_start, format_end, 2);
-    if (qual_field_idxs[1] != UINT32_MAX) {
-      qual_exists = 1;
+  uint64_t sum = 0;
+  while (1) {
+    uint32_t cur_val;
+    if (ScanmovUintCapped(0x7fffffff, &str_iter, &cur_val)) {
+      return 1;
     }
+    sum += cur_val;
+    if (*str_iter != ',') {
+      break;
+    }
+    ++str_iter;
   }
-  return qual_exists;
+  *valp = (sum > 0x7fffffff)? 0x7fffffff : S_CAST(int32_t, sum);
+  return 0;
 }
 
-uint32_t VcfQualScanInit2(STD_ARRAY_KREF(uint32_t, 2) qual_field_idxs, STD_ARRAY_KREF(int32_t, 2) qual_mins, STD_ARRAY_KREF(int32_t, 2) qual_maxs, STD_ARRAY_REF(uint32_t, 2) qual_field_skips, STD_ARRAY_REF(int32_t, 2) qual_line_mins, STD_ARRAY_REF(int32_t, 2) qual_line_maxs) {
-  // handcoded for now, but can be switched to a std::sort call if necessary
-  const uint32_t gq_field_idx = qual_field_idxs[0];
-  uint32_t dp_field_idx = qual_field_idxs[1];
-  uint32_t qual_field_ct = 0;
-  if (dp_field_idx < gq_field_idx) {
-    qual_field_skips[0] = dp_field_idx;
-    qual_line_mins[0] = qual_mins[1];
-    qual_line_maxs[0] = qual_maxs[1];
-    qual_field_ct = 1;
-    dp_field_idx = UINT32_MAX;
+// Returns 1 (failure) unless the FT value starting at ftval passes: it passes
+// when equal to "PASS", ".", or one of the flattened exceptions.  The value is
+// delimited by ':' (the next FORMAT field) or the end of the sample entry.
+uint32_t VcfFtFail(const char* ftval, const char* ftval_end, const char* ft_exceptions) {
+  const char* tok_end = ftval;
+  while ((tok_end != ftval_end) && (*tok_end != ':')) {
+    ++tok_end;
   }
-  if (gq_field_idx != UINT32_MAX) {
-    qual_field_skips[qual_field_ct] = gq_field_idx;
-    qual_line_mins[qual_field_ct] = qual_mins[0];
-    qual_line_maxs[qual_field_ct] = 0x7fffffff;
-    ++qual_field_ct;
-    if (dp_field_idx != UINT32_MAX) {
-      qual_field_skips[qual_field_ct] = dp_field_idx;
-      qual_line_mins[qual_field_ct] = qual_mins[1];
-      qual_line_maxs[qual_field_ct] = qual_maxs[1];
-      ++qual_field_ct;
+  const uint32_t slen = tok_end - ftval;
+  if (strequal_k(ftval, "PASS", slen) || strequal_k(ftval, ".", slen)) {
+    return 0;
+  }
+  if (ft_exceptions) {
+    for (const char* except_iter = ft_exceptions; *except_iter; ) {
+      const uint32_t except_slen = strlen(except_iter);
+      if ((except_slen == slen) && memequal(ftval, except_iter, slen)) {
+        return 0;
+      }
+      except_iter = &(except_iter[except_slen + 1]);
     }
   }
-  if (qual_field_ct == 2) {
-    qual_field_skips[1] -= qual_field_skips[0];
-  }
-  return qual_field_ct;
+  return 1;
 }
 
 // These values are constant over a single VCF line, and relevant to parsing
@@ -873,12 +903,16 @@ typedef struct VcfImportContextBaseStruct {
   uint32_t sample_ct;
   VcfHalfCall halfcall_mode;
   uint32_t error_on_polyploid;
+  const char* qual_ft_exceptions;  // borrowed from VcfQualFilterInfo
 
   // line-specific
   uint32_t gt_exists;
-  STD_ARRAY_DECL(uint32_t, 2, qual_field_skips);
-  STD_ARRAY_DECL(int32_t, 2, qual_line_mins);
-  STD_ARRAY_DECL(int32_t, 2, qual_line_maxs);
+  STD_ARRAY_DECL(uint32_t, kMaxVcfQualFields, qual_field_skips);
+  STD_ARRAY_DECL(uint32_t, kMaxVcfQualFields, qual_field_kinds);
+  STD_ARRAY_DECL(int32_t, kMaxVcfQualFields, qual_line_mins);
+  STD_ARRAY_DECL(int32_t, kMaxVcfQualFields, qual_line_maxs);
+  STD_ARRAY_DECL(int32_t, kMaxVcfQualFields, qual_line_haploid_mins);
+  STD_ARRAY_DECL(int32_t, kMaxVcfQualFields, qual_line_haploid_maxs);
   uint32_t qual_field_ct;  // must be set to zero if no qual fields
 } VcfImportBaseContext;
 
@@ -895,30 +929,130 @@ typedef struct VcfImportContext {
   uint32_t hds_field_idx;
 } VcfImportContext;
 
-// returns 1 if a quality check failed
-// assumes either 1 or 2 qual fields, otherwise change this to a loop
-uint32_t VcfCheckQuals(STD_ARRAY_KREF(uint32_t, 2) qual_field_skips, STD_ARRAY_KREF(int32_t, 2) qual_line_mins, STD_ARRAY_KREF(int32_t, 2) qual_line_maxs, const char* gtext_iter, const char* gtext_end, uint32_t qual_field_ct) {
-  const uint32_t skip0 = qual_field_skips[0];  // this can now be zero
-  if (skip0) {
-    gtext_iter = AdvToNthDelimChecked(gtext_iter, gtext_end, skip0, ':');
-    if (!gtext_iter) {
-      return 0;
+// Locates the requested per-genotype quality fields in the current line's
+// FORMAT column, filling qual_field_idxs/qual_field_kinds with one entry per
+// present-and-requested field (in FORMAT order).  Returns the field count
+// (nonzero iff at least one quality field is present).
+uint32_t VcfQualScanInit1(const char* format_start, const char* format_end, const VcfQualFilterInfo* qfip, STD_ARRAY_REF(uint32_t, kMaxVcfQualFields) qual_field_idxs, STD_ARRAY_REF(uint32_t, kMaxVcfQualFields) qual_field_kinds) {
+  uint32_t qual_field_ct = 0;
+  if (qfip->mins[kVcfQualGq] >= 0) {
+    const uint32_t idx = GetVcfFormatPosition("GQ", format_start, format_end, 2);
+    if (idx != UINT32_MAX) {
+      qual_field_idxs[qual_field_ct] = idx;
+      qual_field_kinds[qual_field_ct] = kVcfQualGq;
+      ++qual_field_ct;
     }
-    ++gtext_iter;
   }
-  int32_t ii;
-  if ((!ScanInt32(gtext_iter, &ii)) && ((ii < qual_line_mins[0]) || (ii > qual_line_maxs[0]))) {
-    return 1;
+  if ((qfip->mins[kVcfQualDp] >= 0) || (qfip->maxs[kVcfQualDp] != 0x7fffffff)) {
+    const uint32_t idx = GetVcfFormatPosition("DP", format_start, format_end, 2);
+    if (idx != UINT32_MAX) {
+      qual_field_idxs[qual_field_ct] = idx;
+      qual_field_kinds[qual_field_ct] = kVcfQualDp;
+      ++qual_field_ct;
+    }
   }
-  if (qual_field_ct == 1) {
-    return 0;
+  if ((qfip->mins[kVcfQualLad] >= 0) || (qfip->maxs[kVcfQualLad] != 0x7fffffff)) {
+    const uint32_t idx = GetVcfFormatPosition("LAD", format_start, format_end, 3);
+    if (idx != UINT32_MAX) {
+      qual_field_idxs[qual_field_ct] = idx;
+      qual_field_kinds[qual_field_ct] = kVcfQualLad;
+      ++qual_field_ct;
+    }
   }
-  gtext_iter = AdvToNthDelimChecked(gtext_iter, gtext_end, qual_field_skips[1], ':');
-  if (!gtext_iter) {
-    return 0;
+  if (qfip->ft_filter) {
+    const uint32_t idx = GetVcfFormatPosition("FT", format_start, format_end, 2);
+    if (idx != UINT32_MAX) {
+      qual_field_idxs[qual_field_ct] = idx;
+      qual_field_kinds[qual_field_ct] = kVcfQualFt;
+      ++qual_field_ct;
+    }
   }
-  ++gtext_iter;
-  return (!ScanInt32(gtext_iter, &ii)) && ((ii < qual_line_mins[1]) || (ii > qual_line_maxs[1]));
+  return qual_field_ct;
+}
+
+// Given the (idx, kind) pairs found by VcfQualScanInit1, sorts them into FORMAT
+// order, converts absolute indices into incremental skip counts, and resolves
+// the per-ploidy thresholds into vibcp.  Returns the field count.
+uint32_t VcfQualScanInit2(STD_ARRAY_KREF(uint32_t, kMaxVcfQualFields) qual_field_idxs, STD_ARRAY_KREF(uint32_t, kMaxVcfQualFields) qual_field_kinds, uint32_t qual_field_ct, const VcfQualFilterInfo* qfip, VcfImportBaseContext* vibcp) {
+  // selection sort by FORMAT index (at most kMaxVcfQualFields entries)
+  uint32_t order[kMaxVcfQualFields];
+  for (uint32_t fidx = 0; fidx != qual_field_ct; ++fidx) {
+    order[fidx] = fidx;
+  }
+  for (uint32_t fidx = 0; (fidx + 1) < qual_field_ct; ++fidx) {
+    uint32_t min_pos = fidx;
+    for (uint32_t fidx2 = fidx + 1; fidx2 != qual_field_ct; ++fidx2) {
+      if (qual_field_idxs[order[fidx2]] < qual_field_idxs[order[min_pos]]) {
+        min_pos = fidx2;
+      }
+    }
+    if (min_pos != fidx) {
+      const uint32_t tmp = order[fidx];
+      order[fidx] = order[min_pos];
+      order[min_pos] = tmp;
+    }
+  }
+  uint32_t prev_idx = 0;
+  for (uint32_t fidx = 0; fidx != qual_field_ct; ++fidx) {
+    const uint32_t src = order[fidx];
+    const uint32_t cur_idx = qual_field_idxs[src];
+    vibcp->qual_field_skips[fidx] = fidx? (cur_idx - prev_idx) : cur_idx;
+    prev_idx = cur_idx;
+    const uint32_t kind = qual_field_kinds[src];
+    vibcp->qual_field_kinds[fidx] = kind;
+    if (kind == kVcfQualGq) {
+      vibcp->qual_line_mins[fidx] = qfip->mins[kVcfQualGq];
+      vibcp->qual_line_maxs[fidx] = 0x7fffffff;
+      vibcp->qual_line_haploid_mins[fidx] = qfip->mins[kVcfQualGq];
+      vibcp->qual_line_haploid_maxs[fidx] = 0x7fffffff;
+    } else if (kind == kVcfQualFt) {
+      vibcp->qual_line_mins[fidx] = 0;
+      vibcp->qual_line_maxs[fidx] = 0x7fffffff;
+      vibcp->qual_line_haploid_mins[fidx] = 0;
+      vibcp->qual_line_haploid_maxs[fidx] = 0x7fffffff;
+    } else {
+      vibcp->qual_line_mins[fidx] = qfip->mins[kind];
+      vibcp->qual_line_maxs[fidx] = qfip->maxs[kind];
+      vibcp->qual_line_haploid_mins[fidx] = qfip->haploid_mins[kind];
+      vibcp->qual_line_haploid_maxs[fidx] = qfip->haploid_maxs[kind];
+    }
+  }
+  vibcp->qual_ft_exceptions = qfip->ft_exceptions;
+  vibcp->qual_field_ct = qual_field_ct;
+  return qual_field_ct;
+}
+
+// returns 1 if a quality check failed
+// is_haploid selects the haploid vs. diploid DP/LAD thresholds
+uint32_t VcfCheckQuals(const VcfImportBaseContext* vibcp, const char* gtext_iter, const char* gtext_end, uint32_t is_haploid) {
+  const uint32_t qual_field_ct = vibcp->qual_field_ct;
+  for (uint32_t fidx = 0; fidx != qual_field_ct; ++fidx) {
+    const uint32_t skip = vibcp->qual_field_skips[fidx];
+    // skip is absolute for fidx 0 (and may be zero), incremental (>=1) after
+    if (skip) {
+      gtext_iter = AdvToNthDelimChecked(gtext_iter, gtext_end, skip, ':');
+      if (!gtext_iter) {
+        // field absent for this sample => pass
+        return 0;
+      }
+      ++gtext_iter;
+    }
+    const uint32_t kind = vibcp->qual_field_kinds[fidx];
+    if (kind == kVcfQualFt) {
+      if (VcfFtFail(gtext_iter, gtext_end, vibcp->qual_ft_exceptions)) {
+        return 1;
+      }
+      continue;
+    }
+    const int32_t cur_min = is_haploid? vibcp->qual_line_haploid_mins[fidx] : vibcp->qual_line_mins[fidx];
+    const int32_t cur_max = is_haploid? vibcp->qual_line_haploid_maxs[fidx] : vibcp->qual_line_maxs[fidx];
+    int32_t ii;
+    const BoolErr scan_failed = (kind == kVcfQualLad)? ScanVcfIntSum(gtext_iter, &ii) : ScanInt32(gtext_iter, &ii);
+    if ((!scan_failed) && ((ii < cur_min) || (ii > cur_max))) {
+      return 1;
+    }
+  }
+  return 0;
 }
 
 // kDosageParseForceMissing = --import-dosage-certainty filter applied
@@ -1147,9 +1281,6 @@ VcfParseErr VcfScanBiallelicHdsLine(const VcfImportContext* vicp, const char* fo
   }
   const VcfHalfCall halfcall_mode = vicp->vibc.halfcall_mode;
   const uint32_t error_on_polyploid = vicp->vibc.error_on_polyploid;
-  STD_ARRAY_KREF(uint32_t, 2) qual_field_skips = vicp->vibc.qual_field_skips;
-  STD_ARRAY_KREF(int32_t, 2) qual_line_mins = vicp->vibc.qual_line_mins;
-  STD_ARRAY_KREF(int32_t, 2) qual_line_maxs = vicp->vibc.qual_line_maxs;
   const uint32_t qual_field_ct = vicp->vibc.qual_field_ct;
 
   const uint32_t dosage_erase_halfdist = vicp->dosage_erase_halfdist;
@@ -1166,12 +1297,12 @@ VcfParseErr VcfScanBiallelicHdsLine(const VcfImportContext* vicp, const char* fo
       return kVcfParseMissingTokens;
     }
     dosagescan_iter = cur_gtext_end;
-    if (qual_field_ct && VcfCheckQuals(qual_field_skips, qual_line_mins, qual_line_maxs, cur_gtext_start, cur_gtext_end, qual_field_ct)) {
-      continue;
-    }
     if (gt_exists) {
       cur_gt_phased = (cur_gtext_start[1] == '|');
       is_haploid = (cur_gtext_start[1] != '/') && (!cur_gt_phased);
+    }
+    if (qual_field_ct && VcfCheckQuals(&(vicp->vibc), cur_gtext_start, cur_gtext_end, is_haploid)) {
+      continue;
     }
     DosageParseResult dpr = kDosageParseOk;
     int32_t cur_dphase_delta = 0;
@@ -1223,9 +1354,6 @@ VcfParseErr VcfConvertPhasedBiallelicDosageLine(const VcfImportContext* vicp, co
   const VcfHalfCall halfcall_mode = vicp->vibc.halfcall_mode;
   const uint32_t error_on_polyploid = vicp->vibc.error_on_polyploid;
   const uint32_t gt_exists = vicp->vibc.gt_exists;
-  STD_ARRAY_KREF(uint32_t, 2) qual_field_skips = vicp->vibc.qual_field_skips;
-  STD_ARRAY_KREF(int32_t, 2) qual_line_mins = vicp->vibc.qual_line_mins;
-  STD_ARRAY_KREF(int32_t, 2) qual_line_maxs = vicp->vibc.qual_line_maxs;
   const uint32_t qual_field_ct = vicp->vibc.qual_field_ct;
 
   Halfword* phasepresent_alias = R_CAST(Halfword*, phasepresent);
@@ -1267,14 +1395,14 @@ VcfParseErr VcfConvertPhasedBiallelicDosageLine(const VcfImportContext* vicp, co
         return kVcfParseMissingTokens;
       }
       uintptr_t cur_geno = 3;
-      if (!(qual_field_ct && VcfCheckQuals(qual_field_skips, qual_line_mins, qual_line_maxs, linebuf_iter, cur_gtext_end, qual_field_ct))) {
+      if (gt_exists) {
+        cur_gt_phased = (linebuf_iter[1] == '|');
+        is_haploid = (linebuf_iter[1] != '/') && (!cur_gt_phased);
+      }
+      if (!(qual_field_ct && VcfCheckQuals(&(vicp->vibc), linebuf_iter, cur_gtext_end, is_haploid))) {
         // We now parse dosage first.  Only care about the hardcall if
         // (i) there's no dosage, or
         // (ii) there's no phased dosage, and it's a phased het.
-        if (gt_exists) {
-          cur_gt_phased = (linebuf_iter[1] == '|');
-          is_haploid = (linebuf_iter[1] != '/') && (!cur_gt_phased);
-        }
         const uint32_t shifted_bit = 1U << sample_idx_lowbits;
         DosageParseResult dpr = kDosageParseOk;
         int32_t cur_dphase_delta = 0;
@@ -1437,9 +1565,6 @@ VcfParseErr VcfConvertPhasedBiallelicDosageLine(const VcfImportContext* vicp, co
 uintptr_t VcfScanShortallelicLine(const VcfImportBaseContext* vibcp, const char* format_end, char** line_iter_ptr) {
   // Just check for a phased het.
   const VcfHalfCall halfcall_mode = vibcp->halfcall_mode;
-  STD_ARRAY_KREF(uint32_t, 2) qual_field_skips = vibcp->qual_field_skips;
-  STD_ARRAY_KREF(int32_t, 2) qual_line_mins = vibcp->qual_line_mins;
-  STD_ARRAY_KREF(int32_t, 2) qual_line_maxs = vibcp->qual_line_maxs;
   const uint32_t qual_field_ct = vibcp->qual_field_ct;
   const char* phasescan_iter = format_end;
   uintptr_t retval = 0;
@@ -1454,7 +1579,7 @@ uintptr_t VcfScanShortallelicLine(const VcfImportBaseContext* vibcp, const char*
       break;
     }
     if (VcfIsHetShort(&(phasescan_iter[-1]), halfcall_mode)) {
-      if ((!qual_field_ct) || (!VcfCheckQuals(qual_field_skips, qual_line_mins, qual_line_maxs, phasescan_iter, FirstPrespace(&(phasescan_iter[2])), qual_field_ct))) {
+      if ((!qual_field_ct) || (!VcfCheckQuals(vibcp, phasescan_iter, FirstPrespace(&(phasescan_iter[2])), 0))) {
         goto VcfScanShortallelicLine_phased_het_found;
       }
     }
@@ -1466,7 +1591,7 @@ uintptr_t VcfScanShortallelicLine(const VcfImportBaseContext* vibcp, const char*
     if ((phasescan_iter[2] != '|') || (!VcfIsHetShort(&(phasescan_iter[1]), halfcall_mode))) {
       continue;
     }
-    if ((!qual_field_ct) || (!VcfCheckQuals(qual_field_skips, qual_line_mins, qual_line_maxs, phasescan_iter, FirstPrespace(&(phasescan_iter[4])), qual_field_ct))) {
+    if ((!qual_field_ct) || (!VcfCheckQuals(vibcp, phasescan_iter, FirstPrespace(&(phasescan_iter[4])), 0))) {
       goto VcfScanShortallelicLine_phased_het_found;
     }
   }
@@ -1484,9 +1609,6 @@ VcfParseErr VcfConvertUnphasedBiallelicLine(const VcfImportBaseContext* vibcp, c
   const uint32_t sample_ctl2_m1 = (sample_ct - 1) / kBitsPerWordD2;
   const VcfHalfCall halfcall_mode = vibcp->halfcall_mode;
   const uint32_t error_on_polyploid = vibcp->error_on_polyploid;
-  STD_ARRAY_KREF(uint32_t, 2) qual_field_skips = vibcp->qual_field_skips;
-  STD_ARRAY_KREF(int32_t, 2) qual_line_mins = vibcp->qual_line_mins;
-  STD_ARRAY_KREF(int32_t, 2) qual_line_maxs = vibcp->qual_line_maxs;
   const uint32_t qual_field_ct = vibcp->qual_field_ct;
 
   uint32_t inner_loop_last = kBitsPerWordD2 - 1;
@@ -1504,14 +1626,14 @@ VcfParseErr VcfConvertUnphasedBiallelicLine(const VcfImportBaseContext* vibcp, c
         return kVcfParseMissingTokens;
       }
       uintptr_t cur_geno;
-      if (qual_field_ct && VcfCheckQuals(qual_field_skips, qual_line_mins, qual_line_maxs, linebuf_iter, cur_gtext_end, qual_field_ct)) {
+      // Still must check for '|', since phasing_flags bit is unset when all
+      // entries are e.g. 0|0.  We just don't bother distinguishing it from
+      // '/'.
+      const uint32_t is_haploid = (linebuf_iter[1] != '/') && (linebuf_iter[1] != '|');
+      if (qual_field_ct && VcfCheckQuals(vibcp, linebuf_iter, cur_gtext_end, is_haploid)) {
         // skipping polyploid check for now
         cur_geno = 3;
       } else {
-        // Still must check for '|', since phasing_flags bit is unset when all
-        // entries are e.g. 0|0.  We just don't bother distinguishing it from
-        // '/'.
-        const uint32_t is_haploid = (linebuf_iter[1] != '/') && (linebuf_iter[1] != '|');
         cur_geno = ctow(*linebuf_iter) - 48;
         if (cur_geno <= 1) {
           if (is_haploid) {
@@ -1585,9 +1707,6 @@ VcfParseErr VcfConvertUnphasedMultiallelicLine(const VcfImportBaseContext* vibcp
   const uint32_t sample_ctl2_m1 = (sample_ct - 1) / kBitsPerWordD2;
   const VcfHalfCall halfcall_mode = vibcp->halfcall_mode;
   const uint32_t error_on_polyploid = vibcp->error_on_polyploid;
-  STD_ARRAY_KREF(uint32_t, 2) qual_field_skips = vibcp->qual_field_skips;
-  STD_ARRAY_KREF(int32_t, 2) qual_line_mins = vibcp->qual_line_mins;
-  STD_ARRAY_KREF(int32_t, 2) qual_line_maxs = vibcp->qual_line_maxs;
   const uint32_t qual_field_ct = vibcp->qual_field_ct;
   Halfword* patch_01_set_alias = R_CAST(Halfword*, patch_01_set);
   Halfword* patch_10_set_alias = R_CAST(Halfword*, patch_10_set);
@@ -1617,11 +1736,11 @@ VcfParseErr VcfConvertUnphasedMultiallelicLine(const VcfImportBaseContext* vibcp
           return kVcfParseMissingTokens;
         }
         uintptr_t cur_geno;
-        if (qual_field_ct && VcfCheckQuals(qual_field_skips, qual_line_mins, qual_line_maxs, linebuf_iter, cur_gtext_end, qual_field_ct)) {
+        const uint32_t is_haploid = (linebuf_iter[1] != '/') && (linebuf_iter[1] != '|');
+        if (qual_field_ct && VcfCheckQuals(vibcp, linebuf_iter, cur_gtext_end, is_haploid)) {
           // skipping polyploid check for now
           cur_geno = 3;
         } else {
-          const uint32_t is_haploid = (linebuf_iter[1] != '/') && (linebuf_iter[1] != '|');
           cur_geno = ctow(*linebuf_iter) - 48;
           if (cur_geno < allele_ct) {
             if (is_haploid) {
@@ -1765,7 +1884,9 @@ VcfParseErr VcfConvertUnphasedMultiallelicLine(const VcfImportBaseContext* vibcp
           return kVcfParseMissingTokens;
         }
         uintptr_t cur_geno;
-        if (qual_field_ct && VcfCheckQuals(qual_field_skips, qual_line_mins, qual_line_maxs, linebuf_iter, cur_gtext_end, qual_field_ct)) {
+        // ploidy isn't cheaply known before parsing in this rare >10-allele
+        // path, so haploid depth-halving is not applied here
+        if (qual_field_ct && VcfCheckQuals(vibcp, linebuf_iter, cur_gtext_end, 0)) {
           // skipping polyploid check for now
           cur_geno = 3;
         } else {
@@ -1966,9 +2087,6 @@ VcfParseErr VcfConvertPhasedBiallelicLine(const VcfImportBaseContext* vibcp, con
   const uint32_t sample_ctl2_m1 = (sample_ct - 1) / kBitsPerWordD2;
   const VcfHalfCall halfcall_mode = vibcp->halfcall_mode;
   const uint32_t error_on_polyploid = vibcp->error_on_polyploid;
-  STD_ARRAY_KREF(uint32_t, 2) qual_field_skips = vibcp->qual_field_skips;
-  STD_ARRAY_KREF(int32_t, 2) qual_line_mins = vibcp->qual_line_mins;
-  STD_ARRAY_KREF(int32_t, 2) qual_line_maxs = vibcp->qual_line_maxs;
   const uint32_t qual_field_ct = vibcp->qual_field_ct;
   Halfword* phasepresent_alias = R_CAST(Halfword*, phasepresent);
   Halfword* phaseinfo_alias = R_CAST(Halfword*, phaseinfo);
@@ -1994,12 +2112,12 @@ VcfParseErr VcfConvertPhasedBiallelicLine(const VcfImportBaseContext* vibcp, con
         return kVcfParseMissingTokens;
       }
       uintptr_t cur_geno;
-      if (qual_field_ct && VcfCheckQuals(qual_field_skips, qual_line_mins, qual_line_maxs, linebuf_iter, cur_gtext_end, qual_field_ct)) {
+      const uint32_t is_phased = (linebuf_iter[1] == '|');
+      const uint32_t is_haploid = (!is_phased) && (linebuf_iter[1] != '/');
+      if (qual_field_ct && VcfCheckQuals(vibcp, linebuf_iter, cur_gtext_end, is_haploid)) {
         // skipping polyploid check for now
         cur_geno = 3;
       } else {
-        const uint32_t is_phased = (linebuf_iter[1] == '|');
-        const uint32_t is_haploid = (!is_phased) && (linebuf_iter[1] != '/');
         cur_geno = ctow(*linebuf_iter) - 48;
         if (cur_geno <= 1) {
           if (is_haploid) {
@@ -2099,9 +2217,6 @@ VcfParseErr VcfConvertPhasedMultiallelicLine(const VcfImportBaseContext* vibcp, 
   const uint32_t sample_ctl2_m1 = (sample_ct - 1) / kBitsPerWordD2;
   const VcfHalfCall halfcall_mode = vibcp->halfcall_mode;
   const uint32_t error_on_polyploid = vibcp->error_on_polyploid;
-  STD_ARRAY_KREF(uint32_t, 2) qual_field_skips = vibcp->qual_field_skips;
-  STD_ARRAY_KREF(int32_t, 2) qual_line_mins = vibcp->qual_line_mins;
-  STD_ARRAY_KREF(int32_t, 2) qual_line_maxs = vibcp->qual_line_maxs;
   const uint32_t qual_field_ct = vibcp->qual_field_ct;
   Halfword* patch_01_set_alias = R_CAST(Halfword*, patch_01_set);
   Halfword* patch_10_set_alias = R_CAST(Halfword*, patch_10_set);
@@ -2138,12 +2253,12 @@ VcfParseErr VcfConvertPhasedMultiallelicLine(const VcfImportBaseContext* vibcp, 
           return kVcfParseMissingTokens;
         }
         uintptr_t cur_geno;
-        if (qual_field_ct && VcfCheckQuals(qual_field_skips, qual_line_mins, qual_line_maxs, linebuf_iter, cur_gtext_end, qual_field_ct)) {
+        const uint32_t is_phased = (linebuf_iter[1] == '|');
+        const uint32_t is_haploid = (!is_phased) && (linebuf_iter[1] != '/');
+        if (qual_field_ct && VcfCheckQuals(vibcp, linebuf_iter, cur_gtext_end, is_haploid)) {
           // skipping polyploid check for now
           cur_geno = 3;
         } else {
-          const uint32_t is_phased = (linebuf_iter[1] == '|');
-          const uint32_t is_haploid = (!is_phased) && (linebuf_iter[1] != '/');
           cur_geno = ctow(*linebuf_iter) - 48;
           if (cur_geno < allele_ct) {
             if (is_haploid) {
@@ -2304,7 +2419,9 @@ VcfParseErr VcfConvertPhasedMultiallelicLine(const VcfImportBaseContext* vibcp, 
           return kVcfParseMissingTokens;
         }
         uintptr_t cur_geno;
-        if (qual_field_ct && VcfCheckQuals(qual_field_skips, qual_line_mins, qual_line_maxs, linebuf_iter, cur_gtext_end, qual_field_ct)) {
+        // ploidy isn't cheaply known before parsing in this rare >10-allele
+        // path, so haploid depth-halving is not applied here
+        if (qual_field_ct && VcfCheckQuals(vibcp, linebuf_iter, cur_gtext_end, 0)) {
           // skipping polyploid check for now
           cur_geno = 3;
         } else {
@@ -2524,9 +2641,6 @@ VcfParseErr VcfConvertPhasedMultiallelicLine(const VcfImportBaseContext* vibcp, 
 
 uintptr_t VcfScanLongallelicLine(const VcfImportBaseContext* vibcp, const char* format_end, char** line_iter_ptr) {
   const VcfHalfCall halfcall_mode = vibcp->halfcall_mode;
-  STD_ARRAY_KREF(uint32_t, 2) qual_field_skips = vibcp->qual_field_skips;
-  STD_ARRAY_KREF(int32_t, 2) qual_line_mins = vibcp->qual_line_mins;
-  STD_ARRAY_KREF(int32_t, 2) qual_line_maxs = vibcp->qual_line_maxs;
   const uint32_t qual_field_ct = vibcp->qual_field_ct;
   const char* phasescan_iter = format_end;
   uintptr_t retval = 0;
@@ -2551,7 +2665,7 @@ uintptr_t VcfScanLongallelicLine(const VcfImportBaseContext* vibcp, const char* 
       break;
     }
     if (VcfIsHetLong(&(phasescan_iter[1]), &(next_vbar[1]), halfcall_mode)) {
-      if ((!qual_field_ct) || (!VcfCheckQuals(qual_field_skips, qual_line_mins, qual_line_maxs, phasescan_iter, FirstPrespace(&(next_vbar[2])), qual_field_ct))) {
+      if ((!qual_field_ct) || (!VcfCheckQuals(vibcp, phasescan_iter, FirstPrespace(&(next_vbar[2])), 0))) {
         goto VcfScanLongallelicLine_phased_het_found;
       }
     }
@@ -2567,7 +2681,7 @@ uintptr_t VcfScanLongallelicLine(const VcfImportBaseContext* vibcp, const char* 
     if ((*next_vbar != '|') || (!VcfIsHetLong(&(phasescan_iter[1]), &(next_vbar[1]), halfcall_mode))) {
       continue;
     }
-    if ((!qual_field_ct) || (!VcfCheckQuals(qual_field_skips, qual_line_mins, qual_line_maxs, phasescan_iter, FirstPrespace(&(next_vbar[2])), qual_field_ct))) {
+    if ((!qual_field_ct) || (!VcfCheckQuals(vibcp, phasescan_iter, FirstPrespace(&(next_vbar[2])), 0))) {
       goto VcfScanLongallelicLine_phased_het_found;
     }
   }
@@ -2588,8 +2702,7 @@ typedef struct VcfGenoToPgenCtxStruct {
   VcfHalfCall halfcall_mode;
   uint32_t error_on_polyploid;
   uint32_t dosage_is_gp;
-  STD_ARRAY_DECL(int32_t, 2, qual_mins);
-  STD_ARRAY_DECL(int32_t, 2, qual_maxs);
+  VcfQualFilterInfo qual_filter_info;
 
   unsigned char** thread_wkspaces;
 
@@ -2619,10 +2732,7 @@ THREAD_FUNC_DECL VcfGenoToPgenThread(void* raw_arg) {
   vic.dosage_erase_halfdist = ctx->dosage_erase_halfdist;
   vic.import_dosage_certainty = ctx->import_dosage_certainty;
   const uint32_t hard_call_halfdist = ctx->hard_call_halfdist;
-  STD_ARRAY_DECL(int32_t, 2, qual_mins);
-  STD_ARRAY_DECL(int32_t, 2, qual_maxs);
-  STD_ARRAY_COPY(ctx->qual_mins, 2, qual_mins);
-  STD_ARRAY_COPY(ctx->qual_maxs, 2, qual_maxs);
+  const VcfQualFilterInfo* qfip = &(ctx->qual_filter_info);
   unsigned char* thread_wkspace = ctx->thread_wkspaces[tidx];
   uintptr_t* patch_01_set = nullptr;
   AlleleCode* patch_01_vals = nullptr;
@@ -2674,8 +2784,9 @@ THREAD_FUNC_DECL VcfGenoToPgenThread(void* raw_arg) {
         char* genotext_start = R_CAST(char*, grp->record_start);
         ++genotext_start;
         uint32_t qual_field_ct = grp->metadata.read_vcf.qual_exists;
+        vic.vibc.qual_field_ct = 0;
         if (qual_field_ct) {
-          qual_field_ct = VcfQualScanInit2(grp->metadata.read_vcf.qual_field_idxs, qual_mins, qual_maxs, vic.vibc.qual_field_skips, vic.vibc.qual_line_mins, vic.vibc.qual_line_maxs);
+          qual_field_ct = VcfQualScanInit2(grp->metadata.read_vcf.qual_field_idxs, grp->metadata.read_vcf.qual_field_kinds, qual_field_ct, qfip, &(vic.vibc));
         }
         vic.vibc.gt_exists = grp->metadata.read_vcf.gt_exists;
         vic.vibc.qual_field_ct = qual_field_ct;
@@ -2765,7 +2876,17 @@ static const char kGpText[] = "GP";
 // pgen_generated and psam_generated assumed to be initialized to 1.
 static_assert(!kVcfHalfCallReference, "VcfToPgen() assumes kVcfHalfCallReference == 0.");
 static_assert(kVcfHalfCallHaploid == 1, "VcfToPgen() assumes kVcfHalfCallHaploid == 1.");
-PglErr VcfToPgen(const char* vcfname, const char* preexisting_psamname, const char* const_fid, const char* dosage_import_field, const char* missing_varid, MiscFlags misc_flags, ImportFlags import_flags, LoadFilterLogFlags load_filter_log_import_flags, uint32_t no_samples_ok, uint32_t is_update_or_impute_sex, uint32_t is_splitpar, uint32_t is_sortvars, uint32_t hard_call_thresh, uint32_t dosage_erase_thresh, double import_dosage_certainty, char id_delim, char idspace_to, int32_t vcf_min_gq, int32_t vcf_min_dp, int32_t vcf_max_dp, VcfHalfCall halfcall_mode, FamCol fam_cols, uint32_t import_max_allele_ct, ImportOverlongVarIdsMode overlong_varids_mode, uint32_t max_thread_ct, char* outname, char* outname_end, ChrInfo* cip, uint32_t* pgen_generated_ptr, uint32_t* psam_generated_ptr) {
+PglErr VcfToPgen(const char* vcfname, const char* preexisting_psamname, const char* const_fid, const char* dosage_import_field, const char* missing_varid, MiscFlags misc_flags, ImportFlags import_flags, LoadFilterLogFlags load_filter_log_import_flags, uint32_t no_samples_ok, uint32_t is_update_or_impute_sex, uint32_t is_splitpar, uint32_t is_sortvars, uint32_t hard_call_thresh, uint32_t dosage_erase_thresh, double import_dosage_certainty, char id_delim, char idspace_to, const VcfImportQcInfo* vcf_qc_infop, VcfHalfCall halfcall_mode, FamCol fam_cols, uint32_t import_max_allele_ct, ImportOverlongVarIdsMode overlong_varids_mode, uint32_t max_thread_ct, char* outname, char* outname_end, ChrInfo* cip, uint32_t* pgen_generated_ptr, uint32_t* psam_generated_ptr) {
+  // these may be reset to "no filter" below if the corresponding FORMAT key is
+  // absent from the header
+  int32_t vcf_min_gq = vcf_qc_infop->min_gq;
+  int32_t vcf_min_dp = vcf_qc_infop->min_dp;
+  int32_t vcf_max_dp = vcf_qc_infop->max_dp;
+  int32_t vcf_min_lad = vcf_qc_infop->min_lad;
+  int32_t vcf_max_lad = vcf_qc_infop->max_lad;
+  uint32_t vcf_ft_filter = vcf_qc_infop->ft_filter;
+  const char* vcf_ft_exceptions = vcf_qc_infop->ft_exceptions;
+  const uint32_t allow_no_vars = (import_flags / kfImportVcfAllowNoVars) & 1;
   // Performs a 2-pass load.  Probably staying that way after sequential writer
   // is implemented since header lines are a pain.
   //
@@ -2841,10 +2962,6 @@ PglErr VcfToPgen(const char* vcfname, const char* preexisting_psamname, const ch
       }
     }
 
-    ctx.qual_mins[0] = vcf_min_gq;
-    ctx.qual_mins[1] = vcf_min_dp;
-    ctx.qual_maxs[0] = 0x7fffffff;
-    ctx.qual_maxs[1] = vcf_max_dp;
     VcfImportContext vic;
     // sample_ct set later
     if (halfcall_mode == kVcfHalfCallDefault) {
@@ -2869,6 +2986,8 @@ PglErr VcfToPgen(const char* vcfname, const char* preexisting_psamname, const ch
     uint32_t format_gt_exists = 0;
     uint32_t format_gq_relevant = 0;
     uint32_t format_dp_relevant = 0;
+    uint32_t format_lad_relevant = 0;
+    uint32_t format_ft_relevant = 0;
     uint32_t format_dosage_relevant = 0;
     uint32_t info_pr_exists = 0;
     uint32_t info_pr_nonflag_exists = 0;
@@ -2984,6 +3103,18 @@ PglErr VcfToPgen(const char* vcfname, const char* preexisting_psamname, const ch
             snprintf(g_logbuf, kLogbufSize, "Error: Header line %" PRIuPTR " of --vcf file does not have expected FORMAT/DP format.\n", line_idx);
           }
           format_dp_relevant = 1;
+        } else if (((vcf_min_lad != -1) || (vcf_max_lad != 0x7fffffff)) && strequal_k(idval, "LAD", id_slen)) {
+          if (unlikely(format_lad_relevant)) {
+            logerrputs("Error: Duplicate FORMAT/LAD header line in --vcf file.\n");
+            goto VcfToPgen_ret_MALFORMED_INPUT;
+          }
+          format_lad_relevant = 1;
+        } else if (vcf_ft_filter && strequal_k(idval, "FT", id_slen)) {
+          if (unlikely(format_ft_relevant)) {
+            logerrputs("Error: Duplicate FORMAT/FT header line in --vcf file.\n");
+            goto VcfToPgen_ret_MALFORMED_INPUT;
+          }
+          format_ft_relevant = 1;
         } else if (dosage_import_field) {
           if ((id_slen == dosage_import_field_slen) && memequal(idval, dosage_import_field, id_slen)) {
             if (unlikely(format_dosage_relevant)) {
@@ -3053,7 +3184,38 @@ PglErr VcfToPgen(const char* vcfname, const char* preexisting_psamname, const ch
       vcf_max_dp = 0x7fffffff;
       vcf_min_dp = -1;
     }
-    const uint32_t format_gq_or_dp_relevant = format_gq_relevant || format_dp_relevant;
+    if ((!format_lad_relevant) && ((vcf_max_lad != 0x7fffffff) || (vcf_min_lad != -1))) {
+      logerrputs("Warning: No FORMAT/LAD key found in --vcf file header.  --vcf-{max,min}-lad\nignored.\n(If this header line is actually present, but with extra spaces or unusual\nfield ordering, standardize the header with e.g. bcftools.)\n");
+      vcf_max_lad = 0x7fffffff;
+      vcf_min_lad = -1;
+    }
+    if ((!format_ft_relevant) && vcf_ft_filter) {
+      logerrputs("Warning: No FORMAT/FT key found in --vcf file header.  --vcf-gt-filter ignored.\n(If this header line is actually present, but with extra spaces or unusual\nfield ordering, standardize the header with e.g. bcftools.)\n");
+      vcf_ft_filter = 0;
+    }
+    // Populate the worker-thread quality-filter configuration now that
+    // header-absent filters have been disabled above.  DP and LAD keep their
+    // separate haploid thresholds (used for haploid GT calls, e.g. male
+    // chrX/chrY and chrM).
+    ctx.qual_filter_info.mins[kVcfQualGq] = vcf_min_gq;
+    ctx.qual_filter_info.maxs[kVcfQualGq] = 0x7fffffff;
+    ctx.qual_filter_info.haploid_mins[kVcfQualGq] = vcf_min_gq;
+    ctx.qual_filter_info.haploid_maxs[kVcfQualGq] = 0x7fffffff;
+    ctx.qual_filter_info.mins[kVcfQualDp] = vcf_min_dp;
+    ctx.qual_filter_info.maxs[kVcfQualDp] = vcf_max_dp;
+    ctx.qual_filter_info.haploid_mins[kVcfQualDp] = vcf_qc_infop->min_dp_haploid;
+    ctx.qual_filter_info.haploid_maxs[kVcfQualDp] = vcf_qc_infop->max_dp_haploid;
+    ctx.qual_filter_info.mins[kVcfQualLad] = vcf_min_lad;
+    ctx.qual_filter_info.maxs[kVcfQualLad] = vcf_max_lad;
+    ctx.qual_filter_info.haploid_mins[kVcfQualLad] = vcf_qc_infop->min_lad_haploid;
+    ctx.qual_filter_info.haploid_maxs[kVcfQualLad] = vcf_qc_infop->max_lad_haploid;
+    ctx.qual_filter_info.mins[kVcfQualFt] = -1;
+    ctx.qual_filter_info.maxs[kVcfQualFt] = 0x7fffffff;
+    ctx.qual_filter_info.haploid_mins[kVcfQualFt] = -1;
+    ctx.qual_filter_info.haploid_maxs[kVcfQualFt] = 0x7fffffff;
+    ctx.qual_filter_info.ft_filter = vcf_ft_filter;
+    ctx.qual_filter_info.ft_exceptions = vcf_ft_filter? vcf_ft_exceptions : nullptr;
+    const uint32_t format_qual_relevant = format_gq_relevant || format_dp_relevant || format_lad_relevant || format_ft_relevant;
     if (format_hds_search) {
       --format_hds_search;
       if (!format_hds_search) {
@@ -3320,13 +3482,14 @@ PglErr VcfToPgen(const char* vcfname, const char* preexisting_psamname, const ch
           // accompanying DS
           vic.hds_field_idx = GetVcfFormatPosition("HDS", linebuf_iter, format_end, 3);
         }
-        if (format_gq_or_dp_relevant) {
-          STD_ARRAY_DECL(uint32_t, 2, qual_field_idxs);
-          uint32_t qual_field_ct = VcfQualScanInit1(linebuf_iter, format_end, vcf_min_gq, vcf_min_dp, vcf_max_dp, qual_field_idxs);
+        if (format_qual_relevant) {
+          STD_ARRAY_DECL(uint32_t, kMaxVcfQualFields, qual_field_idxs);
+          STD_ARRAY_DECL(uint32_t, kMaxVcfQualFields, qual_field_kinds);
+          const uint32_t qual_field_ct = VcfQualScanInit1(linebuf_iter, format_end, &(ctx.qual_filter_info), qual_field_idxs, qual_field_kinds);
           // bugfix (5 Jun 2018): must initialize qual_field_ct to zero
           vic.vibc.qual_field_ct = 0;
           if (qual_field_ct) {
-            vic.vibc.qual_field_ct = VcfQualScanInit2(qual_field_idxs, ctx.qual_mins, ctx.qual_maxs, vic.vibc.qual_field_skips, vic.vibc.qual_line_mins, vic.vibc.qual_line_maxs);
+            VcfQualScanInit2(qual_field_idxs, qual_field_kinds, qual_field_ct, &(ctx.qual_filter_info), &(vic.vibc));
           }
         }
 
@@ -3395,15 +3558,31 @@ PglErr VcfToPgen(const char* vcfname, const char* preexisting_psamname, const ch
         *nonref_flags_iter = nonref_word;
       }
     } else if (unlikely(!variant_ct)) {
+      // --vcf-allow-no-vars turns this into a warning and a clean early exit
+      // (kPglRetSkipped) instead of an error.
+      const char* msg_prefix = allow_no_vars? "Warning: " : "Error: ";
+      const char* msg_suffix = allow_no_vars? ".  No output generated (--vcf-allow-no-vars).\n" : ".\n";
       if (!variant_skip_ct) {
+        if (allow_no_vars) {
+          logerrputs("Warning: No variants in --vcf file.  No output generated (--vcf-allow-no-vars).\n");
+          reterr = kPglRetSkipped;
+          goto VcfToPgen_ret_1;
+        }
         logerrputs("Error: No variants in --vcf file.\n");
         goto VcfToPgen_ret_DEGENERATE_DATA;
       }
-      char* write_iter = strcpya_k(g_logbuf, "Error: All ");
+      char* write_iter = strcpya(g_logbuf, msg_prefix);
+      write_iter = strcpya_k(write_iter, "All ");
       write_iter = wtoa(variant_skip_ct, write_iter);
       write_iter = strcpya_k(write_iter, " variant(s) in --vcf file excluded by ");
       AppendLoadFilterFlagnames(load_filter_log_import_flags, &write_iter);
-      strcpy_k(write_iter, ".\n");
+      strcpy(write_iter, msg_suffix);
+      if (allow_no_vars) {
+        WordWrapB(0);
+        logerrputsb();
+        reterr = kPglRetSkipped;
+        goto VcfToPgen_ret_1;
+      }
       goto VcfToPgen_ret_INCONSISTENT_INPUT_WW;
     }
 
@@ -3821,7 +4000,8 @@ PglErr VcfToPgen(const char* vcfname, const char* preexisting_psamname, const ch
           grp = &(cur_gparse[block_vidx]);
           grp->record_start = geno_buf_iter;
           grp->flags = gparse_flags;
-          STD_ARRAY_COPY(vic.vibc.qual_field_skips, 2, grp->metadata.read_vcf.qual_field_idxs);
+          STD_ARRAY_COPY(vic.vibc.qual_field_skips, kMaxVcfQualFields, grp->metadata.read_vcf.qual_field_idxs);
+          STD_ARRAY_COPY(vic.vibc.qual_field_kinds, kMaxVcfQualFields, grp->metadata.read_vcf.qual_field_kinds);
           grp->metadata.read_vcf.gt_exists = vic.vibc.gt_exists;
           grp->metadata.read_vcf.qual_exists = vic.vibc.qual_field_ct;
           grp->metadata.read_vcf.dosage_field_idx = vic.dosage_field_idx;
@@ -4012,8 +4192,8 @@ PglErr VcfToPgen(const char* vcfname, const char* preexisting_psamname, const ch
             genotext_byte_ct = 1;
           } else {
             linebuf_iter = AdvToDelim(format_start, '\t');
-            if (format_gq_or_dp_relevant) {
-              vic.vibc.qual_field_ct = VcfQualScanInit1(format_start, linebuf_iter, vcf_min_gq, vcf_min_dp, vcf_max_dp, vic.vibc.qual_field_skips);
+            if (format_qual_relevant) {
+              vic.vibc.qual_field_ct = VcfQualScanInit1(format_start, linebuf_iter, &(ctx.qual_filter_info), vic.vibc.qual_field_skips, vic.vibc.qual_field_kinds);
             }
             if ((!phase_or_dosage_found) && (!format_dosage_relevant) && (!format_hds_search)) {
               gparse_flags = kfGparse0;
