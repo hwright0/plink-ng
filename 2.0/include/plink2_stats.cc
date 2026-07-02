@@ -20,7 +20,8 @@
 #include <math.h>
 #include <stdlib.h>  // exit()
 
-#include "plink2_string.h"
+#include "plink2_float.h"
+#include "plink2_highprec.h"
 
 #ifdef __cplusplus
 namespace plink2 {
@@ -66,6 +67,7 @@ static const double kLogMaxValue = 709.0;
 
 static const double kLentzFpmin = 1.0e-30;
 
+// may move some of these tables to plink2_float
 static const double kFactorialRecips[34] = {
   1.0,
   1.0,
@@ -103,7 +105,6 @@ static const double kFactorialRecips[34] = {
   1.151633562077195e-37
 };
 
-// this may move to a more central location
 static const double kSmallRecips[30] = {
   0.0,  // could make this nan, though that's annoying for C++03
   1.0 / 1,
@@ -192,7 +193,7 @@ double upper_gamma_fraction(double a1, double z1) {
   for (double kk = 2.0; kk <= 100.0; kk += 1.0) {
     const double cur_a = kk * (a1 - kk);
     cur_b += 2.0;
-    dd = cur_b + cur_a * dd;
+    dd = cur_a * dd + cur_b;
     if (fabs(dd) < kLentzFpmin) {
       dd = kLentzFpmin;
     }
@@ -209,7 +210,7 @@ double upper_gamma_fraction(double a1, double z1) {
   }
   // const double cont_frac = a0 / hh;
   // return 1 / (z1 - a1 + 1 + cont_frac);
-  return hh / (hh * (z1 - a1 + 1) + a0);
+  return hh / prefer_fma(hh, z1 - a1 + 1, a0);
 }
 
 // from Numerical Recipes in Fortran 77: The Art of Scientific Computing, via
@@ -217,8 +218,24 @@ double upper_gamma_fraction(double a1, double z1) {
 // maximal error of 1.2e-7
 double erfc_fast(double zz) {
   const double tt = 1.0 / (1.0 + 0.5 * zz);
-  const double tau = tt * exp(((((((((0.17087277 * tt - 0.82215223) * tt + 1.48851587) * tt - 1.13520398) * tt + 0.27886807) * tt - 0.18628806) * tt + 0.09678418) * tt + 0.37409196) * tt + 1.00002368) * tt - 1.26551223 - zz * zz);
-  return tau;
+  const double tt2 = tt * tt;
+  const double tt3 = tt * tt2;
+  const double tt4 = tt2 * tt2;
+  // - zz * zz - 1.26551223
+  // + tt * 1.00002368
+  // + tt^2 * 0.37409196
+  // + tt^3 * 0.09678418
+  // + tt^4 * (-0.18628806)
+  // + tt^5 * 0.27886807
+  // + tt^6 * (-1.13520398)
+  // + tt^7 * 1.48851587
+  // + tt^8 * (-0.82215223)
+  // + tt^9 * 0.17087277
+  const double rem0 = prefer_fma(prefer_fma(-0.82215223, tt4, -0.18628806), tt4, -prefer_fma(zz, zz, 1.26551223));
+  const double rem1 = prefer_fma(prefer_fma(0.17087277, tt4, 0.27886807), tt4, 1.00002368) * tt;
+  const double rem2 = prefer_fma(-1.13520398, tt4, 0.37409196) * tt2;
+  const double rem3 = prefer_fma(1.48851587, tt4, 0.09678418) * tt3;
+  return tt * exp(rem0 + rem1 + (rem2 + rem3));
 }
 
 static const double kSmallHalfRecips[30] = {
@@ -290,20 +307,16 @@ double lanczos_sum_f(double zz) {
     s1 = kLanczosFloatSumNumer[5];
     s2 = kLanczosFloatSumDenom[5];
     for (int32_t ii = 4; ii >= 0; --ii) {
-      s1 *= zz;
-      s2 *= zz;
-      s1 += kLanczosFloatSumNumer[S_CAST(uint32_t, ii)];
-      s2 += kLanczosFloatSumDenom[S_CAST(uint32_t, ii)];
+      s1 = prefer_fma(s1, zz, kLanczosFloatSumNumer[S_CAST(uint32_t, ii)]);
+      s2 = prefer_fma(s2, zz, kLanczosFloatSumDenom[S_CAST(uint32_t, ii)]);
     }
   } else {
     zz = 1 / zz;
     s1 = kLanczosFloatSumNumer[0];
     s2 = kLanczosFloatSumDenom[0];
     for (uint32_t uii = 1; uii != 6; ++uii) {
-      s1 *= zz;
-      s2 *= zz;
-      s1 += kLanczosFloatSumNumer[uii];
-      s2 += kLanczosFloatSumDenom[uii];
+      s1 = prefer_fma(s1, zz, kLanczosFloatSumNumer[uii]);
+      s2 = prefer_fma(s2, zz, kLanczosFloatSumDenom[uii]);
     }
   }
   return s1 / s2;
@@ -316,20 +329,16 @@ double lanczos_sum_f_expg_scaled_imp(double zz, double* s2_ptr) {
     s1 = kLanczosFloatSumExpgNumer[5];
     s2 = kLanczosFloatSumDenom[5];
     for (int32_t ii = 4; ii >= 0; --ii) {
-      s1 *= zz;
-      s2 *= zz;
-      s1 += kLanczosFloatSumExpgNumer[S_CAST(uint32_t, ii)];
-      s2 += kLanczosFloatSumDenom[S_CAST(uint32_t, ii)];
+      s1 = prefer_fma(s1, zz, kLanczosFloatSumExpgNumer[S_CAST(uint32_t, ii)]);
+      s2 = prefer_fma(s2, zz, kLanczosFloatSumDenom[S_CAST(uint32_t, ii)]);
     }
   } else {
     zz = 1 / zz;
     s1 = kLanczosFloatSumExpgNumer[0];
     s2 = kLanczosFloatSumDenom[0];
     for (uint32_t uii = 1; uii != 6; ++uii) {
-      s1 *= zz;
-      s2 *= zz;
-      s1 += kLanczosFloatSumExpgNumer[uii];
-      s2 += kLanczosFloatSumDenom[uii];
+      s1 = prefer_fma(s1, zz, kLanczosFloatSumExpgNumer[uii]);
+      s2 = prefer_fma(s2, zz, kLanczosFloatSumDenom[uii]);
     }
   }
   *s2_ptr = s2;
@@ -347,50 +356,6 @@ double lanczos_sum_f_expg_scaled_recip(double zz) {
   double s1 = lanczos_sum_f_expg_scaled_imp(zz, &s2);
   return s2 / s1;
 }
-
-// We want better-than-float precision for our log-factorial function.
-static const double kLanczosDoubleSumDenom[13] = {0, 39916800, 120543840, 150917976, 105258076, 45995730, 13339535, 2637558, 357423, 32670, 1925, 66, 1};
-static const double kLanczosDoubleSumExpgNumer[13] = {56906521.913471564, 103794043.11634455, 86363131.288138591, 43338889.324676138, 14605578.087685068, 3481712.1549806459, 601859.61716810988, 75999.293040145426, 6955.9996025153761, 449.94455690631681, 19.519927882476175, 0.50984166556566762, 0.0060618423462489065};
-
-// this depends on the polynomial coefficients above
-static const double kLanczosDoubleG = 6.0246800407767296;
-
-double lanczos_sum_d_expg_scaled_imp(double zz, double* s2_ptr) {
-  double s1;
-  double s2;
-  // Only called by Lfact() for now, where zz is guaranteed to be > 1.
-  /*
-  if (zz <= 1) {
-    s1 = kLanczosDoubleSumExpgNumer[12];
-    s2 = kLanczosDoubleSumDenom[12];
-    for (int32_t ii = 11; ii >= 0; --ii) {
-      s1 *= zz;
-      s2 *= zz;
-      s1 += kLanczosDoubleSumExpgNumer[S_CAST(uint32_t, ii)];
-      s2 += kLanczosDoubleSumDenom[S_CAST(uint32_t, ii)];
-    }
-  } else {
-  */
-  zz = 1 / zz;
-  s1 = kLanczosDoubleSumExpgNumer[0];
-  s2 = kLanczosDoubleSumDenom[0];
-  for (uint32_t uii = 1; uii != 13; ++uii) {
-    s1 *= zz;
-    s2 *= zz;
-    s1 += kLanczosDoubleSumExpgNumer[uii];
-    s2 += kLanczosDoubleSumDenom[uii];
-  }
-  // }
-  *s2_ptr = s2;
-  return s1;
-}
-
-double lanczos_sum_d_expg_scaled(double zz) {
-  double s2;
-  double s1 = lanczos_sum_d_expg_scaled_imp(zz, &s2);
-  return s1 / s2;
-}
-
 
 double log1pmx(double xx) {
   // log(1+x) - x
@@ -429,7 +394,7 @@ double regularized_gamma_prefix(double aa, double zz) {
   double prefix;
   if ((fabs(dd * dd * aa) <= 100) && (aa > 150)) {
     // abs(dd) < sqrt(2/3) < 0.95
-    prefix = aa * log1pmx(dd) + zz * (0.5 - kLanczosFloatG) * agh_recip;
+    prefix = zz * (0.5 - kLanczosFloatG) * agh_recip + aa * log1pmx(dd);
     prefix = exp(prefix);
   } else {
     const double alz = aa * log(zz * agh_recip);
@@ -476,11 +441,13 @@ double igamma_temme_large(double aa, double xx) {
     zz = -zz;
   }
   double workspace[3];
-  workspace[0] = (((((kTemmeC0[6] * zz + kTemmeC0[5]) * zz + kTemmeC0[4]) * zz + kTemmeC0[3]) * zz + kTemmeC0[2]) * zz + kTemmeC0[1]) * zz + kTemmeC0[0];
-  workspace[1] = (((kTemmeC1[4] * zz + kTemmeC1[3]) * zz + kTemmeC1[2]) * zz + kTemmeC1[1]) * zz + kTemmeC1[0];
-  workspace[2] = (kTemmeC2[2] * zz + kTemmeC2[1]) * zz + kTemmeC2[0];
+  // todo: benchmark some other ways of organizing this computation.  there are
+  // three independent calculation chains, which I'd expect to be decent?
+  workspace[0] = prefer_fma(prefer_fma(prefer_fma(prefer_fma(prefer_fma(prefer_fma(kTemmeC0[6], zz, kTemmeC0[5]), zz, kTemmeC0[4]), zz, kTemmeC0[3]), zz, kTemmeC0[2]), zz, kTemmeC0[1]), zz, kTemmeC0[0]);
+  workspace[1] = prefer_fma(prefer_fma(prefer_fma(prefer_fma(kTemmeC1[4], zz, kTemmeC1[3]), zz, kTemmeC1[2]), zz, kTemmeC1[1]), zz, kTemmeC1[0]);
+  workspace[2] = prefer_fma(prefer_fma(kTemmeC2[2], zz, kTemmeC2[1]), zz, kTemmeC2[0]);
   const double a_recip = 1 / aa;
-  double result = (workspace[2] * a_recip + workspace[1]) * a_recip + workspace[0];
+  double result = prefer_fma(prefer_fma(workspace[2], a_recip, workspace[1]), a_recip, workspace[0]);
   result *= exp(-yy) / ((kSqrt2 * kSqrtPi) * sqrt_a);
   if (xx < aa) {
     result = -result;
@@ -648,8 +615,16 @@ double finite_gamma_q_ln(uint32_t aa, double xx) {
 }
 
 double erfc_fast2(double zz, double* tau_ln_plus_z2_ptr) {
+  // probable todo: deduplicate with erfc_fast()
   const double tt = 1.0 / (1.0 + 0.5 * zz);
-  *tau_ln_plus_z2_ptr = ((((((((0.17087277 * tt - 0.82215223) * tt + 1.48851587) * tt - 1.13520398) * tt + 0.27886807) * tt - 0.18628806) * tt + 0.09678418) * tt + 0.37409196) * tt + 1.00002368) * tt - 1.26551223;
+  const double tt2 = tt * tt;
+  const double tt3 = tt * tt2;
+  const double tt4 = tt2 * tt2;
+  const double rem0 = prefer_fma(prefer_fma(-0.82215223, tt4, -0.18628806), tt4, -1.26551223);
+  const double rem1 = prefer_fma(prefer_fma(0.17087277, tt4, 0.27886807), tt4, 1.00002368) * tt;
+  const double rem2 = prefer_fma(-1.13520398, tt4, 0.37409196) * tt2;
+  const double rem3 = prefer_fma(1.48851587, tt4, 0.09678418) * tt3;
+  *tau_ln_plus_z2_ptr = rem0 + rem1 + (rem2 + rem3);
   return tt;
 }
 
@@ -661,6 +636,7 @@ double finite_half_gamma_q2_ln(uint32_t a_minus_half, double xx) {
   if (!a_minus_half) {
     return log(tt) + tau_ln_plus_x - xx;
   }
+  double ee = tt * exp(tau_ln_plus_x);
   // pre-multiply by e^x to avoid underflow
   double term = sqrt_x * (2.0 / kSqrtPi);
   double sum = term;
@@ -669,11 +645,9 @@ double finite_half_gamma_q2_ln(uint32_t a_minus_half, double xx) {
     sum += term;
   }
   // tau_ln + xx guaranteed to be small
-  double ee = tt * exp(tau_ln_plus_x) + sum;
+  ee += sum;
   return log(ee) - xx;
 }
-
-static const double kLnSqrtPi = 0.5723649429247001;
 
 // compute -log((z^a)(e^{-z})/tgamma(a))
 double regularized_gamma_prefix_ln(double aa, double zz) {
@@ -689,9 +663,9 @@ double regularized_gamma_prefix_ln(double aa, double zz) {
   double prefix_ln;
   if ((fabs(dd * dd * aa) <= 100) && (aa > 150)) {
     // abs(dd) < sqrt(2/3) < 0.95
-    prefix_ln = aa * log1pmx(dd) + zz * (0.5 - kLanczosFloatG) * agh_recip;
+    prefix_ln = zz * (0.5 - kLanczosFloatG) * agh_recip + aa * log1pmx(dd);
   } else {
-    prefix_ln = (aa - zz) + aa * log(zz * agh_recip);
+    prefix_ln = prefer_fma(aa, log(zz * agh_recip), aa - zz);
   }
   const double scaled_recip = lanczos_sum_f_expg_scaled_recip(aa);
   return prefix_ln + 0.5 * log(agh * kRecipE * scaled_recip * scaled_recip);
@@ -814,7 +788,7 @@ double find_inverse_gamma2(uint32_t df, double pp, double qq, uint32_t* has_10_d
       //   = p * p * g * g * 0.25
       //   = p * p * pi * 0.25
       const double uu = pp * pp * (0.25 * kPi);
-      return (uu / (1 - (uu * (1.0 / 1.5))));
+      return uu / prefer_fma(uu, -1.0 / 1.5, 1);
     } else {
       const double yy = -log(bb);
       if (bb > 0.1) {
@@ -822,7 +796,7 @@ double find_inverse_gamma2(uint32_t df, double pp, double qq, uint32_t* has_10_d
         if (bb > 0.15) {
           return (yy - 0.5 * log(uu) - log(1 + 0.5 / uu));
         }
-        return (yy - 0.5 * log(uu) - log(((uu + 5) * uu + 3.75) / ((uu + 4.5) * uu + 2)));
+        return (yy - 0.5 * log(uu) - log(prefer_fma(uu + 5, uu, 3.75) / prefer_fma(uu + 4.5, uu, 2)));
       } else {
         const double c1 = -0.5 * log(yy);
         const double c1_2 = c1 * c1;
@@ -832,9 +806,9 @@ double find_inverse_gamma2(uint32_t df, double pp, double qq, uint32_t* has_10_d
         // a_3 = 0.125
 
         const double c2 = -0.5 * (1 + c1);
-        const double c3 = 0.25 * c1_2 + 0.75 * c1 + 0.875;
-        const double c4 = c1_3 * (-1.0 / 6.0) - 0.875 * c1_2 - 1.875 * c1 - (26.75 / 12.0);
-        const double c5 = 0.125 * c1_4 + (5.75 / 6.0) * c1_3 + 3.625 * c1_2 + 7.75 * c1 + (83.0625 / 12.0);
+        const double c3 = 0.25 * c1_2 + prefer_fma(0.75, c1, 0.875);
+        const double c4 = prefer_fma(c1_3, -1.0 / 6.0, -26.75 / 12.0) - prefer_fma(0.875, c1_2, 1.875 * c1);
+        const double c5 = prefer_fma(5.75 / 6.0, c1_3, 0.125 * c1_4) + prefer_fma(3.625, c1_2, prefer_fma(7.75, c1, 83.0625 / 12.0));
 
         const double y_recip = 1.0 / yy;
         const double y_recip_2 = y_recip * y_recip;
@@ -843,8 +817,8 @@ double find_inverse_gamma2(uint32_t df, double pp, double qq, uint32_t* has_10_d
         if (bb < 1e-28) {
           *has_10_digits_ptr = 1;
         }
-        // er, I'd think this should just use Horner's instead?
-        return (yy + c1 + c2 * y_recip + c3 * y_recip_2 + c4 * y_recip_3 + c5 * y_recip_4);
+        // possible todo: benchmark other ways of organizing this calculation
+        return prefer_fma(c2, y_recip, yy) + prefer_fma(c3, y_recip_2, c1) + prefer_fma(c5, y_recip_4, c4 * y_recip_3);
       }
     }
   }
@@ -912,7 +886,7 @@ double gamma_p_inv_imp2(uint32_t df, double qq) {
     if (f2 != 0) {
       // delta = Stepper::step(result, f0, f1, f2);
       const double denom = 2 * f0;
-      const double numer = 2 * f1 - f0 * (f2 / f1);
+      const double numer = prefer_fma(-f0, f2 / f1, 2 * f1);
       if ((fabs(numer) >= 1) || (fabs(denom) < fabs(numer) * DBL_MAX)) {
         const double halley_step = denom / numer;
         if (halley_step / delta < 0) {
@@ -977,10 +951,10 @@ double gamma_p_inv_imp2(uint32_t df, double qq) {
   return result;
 }
 
-double PToChisq(double pval, uint32_t df) {
-  // only need this to handle df=1, 2, 4 for now
-  return gamma_p_inv_imp2(df, pval) * 2;
-}
+// double PToChisq(double pval, uint32_t df) {
+//   // only need this to handle df=1, 2, 4 for now
+//   return gamma_p_inv_imp2(df, pval) * 2;
+// }
 
 // ***** end thread-safe PToChisq *****
 
@@ -989,6 +963,7 @@ double LnPToChisq(double ln_pval) {
     return gamma_p_inv_imp2(1, exp(ln_pval)) * 2;
   }
   // (bb < 1e-28) case in find_inverse_gamma2()
+  // possible todo: deduplicate code
   const double yy = kLnSqrtPi - ln_pval;
   const double c1 = -0.5 * log(yy);
   const double c1_2 = c1 * c1;
@@ -998,75 +973,19 @@ double LnPToChisq(double ln_pval) {
   // a_3 = 0.125
 
   const double c2 = -0.5 * (1 + c1);
-  const double c3 = 0.25 * c1_2 + 0.75 * c1 + 0.875;
-  const double c4 = c1_3 * (-1.0 / 6.0) - 0.875 * c1_2 - 1.875 * c1 - (26.75 / 12.0);
-  const double c5 = 0.125 * c1_4 + (5.75 / 6.0) * c1_3 + 3.625 * c1_2 + 7.75 * c1 + (83.0625 / 12.0);
+  const double c3 = 0.25 * c1_2 + prefer_fma(0.75, c1, 0.875);
+  const double c4 = prefer_fma(c1_3, -1.0 / 6.0, -26.75 / 12.0) - prefer_fma(0.875, c1_2, 1.875 * c1);
+  const double c5 = prefer_fma(5.75 / 6.0, c1_3, 0.125 * c1_4) + prefer_fma(3.625, c1_2, prefer_fma(7.75, c1, 83.0625 / 12.0));
 
   const double y_recip = 1.0 / yy;
   const double y_recip_2 = y_recip * y_recip;
   const double y_recip_3 = y_recip_2 * y_recip;
   const double y_recip_4 = y_recip_2 * y_recip_2;
-  // er, I'd think this should just use Horner's instead?
-  return 2 * (yy + c1 + c2 * y_recip + c3 * y_recip_2 + c4 * y_recip_3 + c5 * y_recip_4);
+  return 2 * (prefer_fma(c2, y_recip, yy) + prefer_fma(c3, y_recip_2, c1) + prefer_fma(c5, y_recip_4, c4 * y_recip_3));
 }
 
 
-// ***** thread-safe TstatToP *****
-// ...time to get rid of this
-
-// see Numerical Recipes, section 6.4
-// no overflow or convergence issues
-double betacf_slow(double aa, double bb, double xx) {
-  double qab = aa + bb;
-  double qap = aa + 1.0;
-  double qam = aa - 1.0;
-  double cc = 1.0;
-  double dd = 1.0 - qab * xx / qap;
-  if (fabs(dd) < kLentzFpmin) {
-    dd = kLentzFpmin;
-  }
-  dd = 1.0 / dd;
-  double hh = dd;
-  // evaluate 1 / (1 + d_1 / (1 + d_2 / (1 + d_3 / (...))))
-  // might need more iterations for very large df?
-  for (double mm = 1.0; mm <= 100.0; mm += 1.0) {
-    double m2 = 2 * mm;
-
-    // d_{2m}
-    double tmp_aa = mm * (bb - mm) * xx / ((qam + m2) * (aa + m2));
-
-    dd = 1.0 + tmp_aa * dd;
-    if (fabs(dd) < kLentzFpmin) {
-      dd = kLentzFpmin;
-    }
-    cc = 1.0 + tmp_aa / cc;
-    if (fabs(cc) < kLentzFpmin) {
-      cc = kLentzFpmin;
-    }
-    dd = 1.0 / dd;
-    hh *= dd * cc;
-
-    // d_{2m+1}
-    tmp_aa = -(aa + mm) * (qab + mm) * xx / ((aa + m2) * (qap + m2));
-
-    dd = 1.0 + tmp_aa * dd;
-    if (fabs(dd) < kLentzFpmin) {
-      dd = kLentzFpmin;
-    }
-    cc = 1.0 + tmp_aa / cc;
-    if (fabs(cc) < kLentzFpmin) {
-      cc = kLentzFpmin;
-    }
-    dd = 1.0 / dd;
-    double del = dd * cc;
-    hh *= del;
-    if (fabs(del - 1.0) < kContinuedFractionEpsilon) {
-      return hh;
-    }
-  }
-  // don't detect failure for now
-  return hh;
-}
+// ***** thread-safe TstatToLnP *****
 
 // Returns log(1 - x^y).
 // Assumes x in (0, 1), y positive.
@@ -1097,7 +1016,7 @@ double binomial_ccdf_ln(uint32_t nn, uint32_t kk, double xx, double yy, uint32_t
   double multiplier = 1.0;
   double cur_term = 1.0;
   // need to shift to avoid overflow for n > 1 billion, (n-k) close to 40
-  double shifted_inv_binom_coeff = 1.0 / kExactTestBias;
+  double shifted_inv_binom_coeff = k2p50 * (1LL << 33);
   double i_d = n_d - k_plus1_d;
   for (uint32_t uii = nn - kk - 1; uii; --uii) {
     //   (n choose (i - 1)) / (n choose i)
@@ -1128,10 +1047,9 @@ double binomial_ccdf_ln(uint32_t nn, uint32_t kk, double xx, double yy, uint32_t
     cur_term *= cur_binom_ratio * x_div_y;
     multiplier += cur_term;
   }
-  // 1.0 / kExactTestBias = 2^83
   // tried taking log(multiplier / shifted_inv_binom_coeff), but that was
   // slower on my Mac?
-  const double result_ln = log(multiplier) + k_plus1_d * log(xx) + (n_d - k_plus1_d) * log(yy) - log(shifted_inv_binom_coeff) + 83 * kLn2;
+  const double result_ln = log(multiplier) + k_plus1_d * log(xx) - log(shifted_inv_binom_coeff) + prefer_fma(n_d - k_plus1_d, log(yy), 83 * kLn2);
   if (!inv) {
     return result_ln;
   }
@@ -1192,9 +1110,7 @@ double ibeta_series_ln(double aa, double bb, double xx, uint32_t inv) {
 
 double ln_sum(double aa, double bb) {
   if (aa > bb) {
-    const double tmp = aa;
-    aa = bb;
-    bb = tmp;
+    swap_f64(&aa, &bb);
   }
   const double diff = bb - aa;
   if ((aa == -DBL_MAX) || (diff >= kLn2 * 53)) {
@@ -1237,7 +1153,7 @@ double beta_small_b_large_a_series_ln(double aa, double bb, double xx, double yy
   }
   double uu = -tt * lx;
   double hh_ln = regularized_gamma_prefix_ln(bb, uu);
-  double prefix_ln = hh_ln - log(tgamma_delta_ratio(aa, bb)) - bb * log(tt);
+  double prefix_ln = prefer_fma(-bb, log(tt), hh_ln) - log(tgamma_delta_ratio(aa, bb));
   // validated up to this point
 
   double pp[15]; // ~8-15 digit accuracy
@@ -1270,8 +1186,10 @@ double beta_small_b_large_a_series_ln(double aa, double bb, double xx, double yy
     double new_pn = 0.0;
     uint32_t tmp1 = 3;
     const double nn_d = u31tod(nn);
+    // when this type of loop is a bottleneck, easiest win should be going up
+    // to 2-8 accumulators
     for (uint32_t mm = 1; mm < nn; ++mm) {
-      double mbn = u31tod(mm) * bb - nn_d;
+      double mbn = prefer_fma(u31tod(mm), bb, -nn_d);
       new_pn += mbn * pp[nn - mm] * kFactorialRecips[tmp1];
       tmp1 += 2;
     }
@@ -1326,7 +1244,7 @@ double ibeta_power_terms_ln(double aa, double bb, double xx, double yy) {
   // Since we're returning log(result) rather than the original result (thus,
   // no intermediate overflow/underflow problems), and we only need 6 digits of
   // precision, we shouldn't need any of the numerous cases in the Boost code.
-  return result_ln + aa * log1p(l1) + bb * log1p(l2);
+  return prefer_fma(aa, log1p(l1), result_ln) + bb * log1p(l2);
 }
 
 double ibeta_a_step_ln(double aa, double bb, double xx, double yy, uint32_t kk) {
@@ -1353,7 +1271,7 @@ double ibeta_fraction2_ln(double aa, double bb, double xx, double yy, uint32_t i
   double result_ln = ibeta_power_terms_ln(aa, bb, xx, yy);
 
   // see Boost continued_fraction_b()
-  const double ay_minus_bx_plus1 = aa * yy - bb * xx + 1.0;
+  const double ay_minus_bx_plus1 = aa * yy - prefer_fma(bb, xx, -1.0);
   double cc = (aa * ay_minus_bx_plus1) / (aa + 1.0);
   if (fabs(cc) < kLentzFpmin) {
     cc = kLentzFpmin;
@@ -1369,9 +1287,8 @@ double ibeta_fraction2_ln(double aa, double bb, double xx, double yy, uint32_t i
     cur_a *= mm * (bb - mm) * x2;
     double denom = aa + 2 * mm - 1.0;
     cur_a /= denom * denom;
-    double cur_b = mm;
-    cur_b += (mm * (bb - mm) * xx) / (aa + 2 * mm - 1.0);
-    cur_b += ((aa + mm) * (ay_minus_bx_plus1 + mm * (2.0 - xx))) / (aa + 2 * mm + 1.0);
+    double cur_b = prefer_fma(mm * (bb - mm), xx / (aa + 2 * mm - 1.0), mm);
+    cur_b += ((aa + mm) * prefer_fma(mm, 2.0 - xx, ay_minus_bx_plus1)) / (aa + 2 * mm + 1.0);
     dd = cur_b + cur_a * dd;
     if (fabs(dd) < kLentzFpmin) {
       dd = kLentzFpmin;
@@ -1393,7 +1310,7 @@ double ibeta_fraction2_ln(double aa, double bb, double xx, double yy, uint32_t i
 double ibeta_imp2_ln(uint32_t df1, uint32_t df2, double xx, uint32_t inv) {
   // In addition to Boost beta.hpp and its dependencies, see DiDonato and
   // Morris's original paper at
-  // https://apps.dtic.mil/dtic/tr/fulltext/u2/a210118.pdf .
+  //   https://dl.acm.org/doi/10.1145/131766.131776 .
 
   // normalized always true
   //
@@ -1420,9 +1337,7 @@ double ibeta_imp2_ln(uint32_t df1, uint32_t df2, double xx, uint32_t inv) {
     df1 = df2;
     df2 = 2;
 
-    const double tmp = xx;
-    xx = yy;
-    yy = tmp;
+    swap_f64(&xx, &yy);
 
     inv = !inv;
   }
@@ -1449,18 +1364,9 @@ double ibeta_imp2_ln(uint32_t df1, uint32_t df2, double xx, uint32_t inv) {
   double bb = u31tod(df2) * 0.5;
   if ((df1 == 1) || (df2 == 1)) {
     if (xx > 0.5) {
-      const uint32_t tmp1 = df1;
-      df1 = df2;
-      df2 = tmp1;
-
-      double tmp2 = aa;
-      aa = bb;
-      bb = tmp2;
-
-      tmp2 = xx;
-      xx = yy;
-      yy = tmp2;
-
+      swap_u32(&df1, &df2);
+      swap_f64(&aa, &bb);
+      swap_f64(&xx, &yy);
       inv = !inv;
     }
     // can ignore max(a, b) <= 1 branch
@@ -1479,23 +1385,14 @@ double ibeta_imp2_ln(uint32_t df1, uint32_t df2, double xx, uint32_t inv) {
   }
   double lambda;
   if (aa < bb) {
-    lambda = aa - (aa + bb) * xx;
+    lambda = prefer_fma(aa + bb, -xx, aa);
   } else {
-    lambda = (aa + bb) * yy - bb;
+    lambda = prefer_fma(aa + bb, yy, -bb);
   }
   if (lambda < 0.0) {
-    const uint32_t tmp1 = df1;
-    df1 = df2;
-    df2 = tmp1;
-
-    double tmp2 = aa;
-    aa = bb;
-    bb = tmp2;
-
-    tmp2 = xx;
-    xx = yy;
-    yy = tmp2;
-
+    swap_u32(&df1, &df2);
+    swap_f64(&aa, &bb);
+    swap_f64(&xx, &yy);
     inv = !inv;
   }
 
@@ -1524,32 +1421,6 @@ double ibeta_imp2_ln(uint32_t df1, uint32_t df2, double xx, uint32_t inv) {
   fract_ln = ln_sum(fract_ln, ibeta_a_step_ln(aa, bbar, xx, yy, 20));
   return beta_small_b_large_a_series_ln(aa + 20.0, bbar, xx, yy, fract_ln, inv);
 }
-
-double TstatToP2(double tt, double df, double cached_gamma_mult) {
-  // assumes cached_mult == exp(lgamma(df * 0.5 + 0.5) - lgamma(df * 0.5) -
-  //   lgamma(0.5))
-  //         invert_thresh = (df + 2) / (df + 5)
-  double tt_sq = tt * tt;
-  double denom_recip = 1.0 / (df + tt_sq);
-  double xx = df * denom_recip;
-  double yy = tt_sq * denom_recip;
-  if ((xx < 0.0) || (yy < 0.0)) {
-    return -9;
-  }
-  uint32_t do_invert = (xx * (df + 5.0)) >= (df + 2.0);
-  if ((xx == 0.0) || (yy == 0.0)) {
-    return u31tod(do_invert);
-  }
-  double aa = df * 0.5;
-  double bt = cached_gamma_mult * pow(xx, aa) * sqrt(yy);
-  if (!do_invert) {
-    return bt * betacf_slow(aa, 0.5, xx) / aa;
-  }
-  return 1.0 - bt * 2 * betacf_slow(0.5, aa, yy);
-}
-// ***** end thread-safe TstatToP calculation *****
-
-// ***** begin TstatToLnP *****
 
 double TstatToLnP(double tt, uint32_t df) {
   const double df_d = u31tod(df);
@@ -1645,143 +1516,70 @@ static const double kIvnHigh = 0.97575;
 double QuantileToZscore(double pval) {
   // This was named ltqnorm() in PLINK 1.x.
   // assumes 0 < pval < 1
-  double q, r;
-
-  if (pval < kIvnLow) {
-    // Rational approximation for lower region
-    q = sqrt(-2*log(pval));
-    return (((((kIvnC[0]*q+kIvnC[1])*q+kIvnC[2])*q+kIvnC[3])*q+kIvnC[4])*q+kIvnC[5]) /
-      ((((kIvnD[0]*q+kIvnD[1])*q+kIvnD[2])*q+kIvnD[3])*q+1);
-  }
-  if (pval > kIvnHigh) {
-    // Rational approximation for upper region
-    q  = sqrt(-2*log(1-pval));
-    return -(((((kIvnC[0]*q+kIvnC[1])*q+kIvnC[2])*q+kIvnC[3])*q+kIvnC[4])*q+kIvnC[5]) /
-      ((((kIvnD[0]*q+kIvnD[1])*q+kIvnD[2])*q+kIvnD[3])*q+1);
+  if ((pval < kIvnLow) || (pval > kIvnHigh)) {
+    // Rational approximation for lower/upper region
+    const double q2 = -2 * log((pval < kIvnLow)? pval : (1 - pval));
+    const double q = sqrt(q2);
+    // return (((((kIvnC[0]*q+kIvnC[1])*q+kIvnC[2])*q+kIvnC[3])*q+kIvnC[4])*q+kIvnC[5]) /
+    //   ((((kIvnD[0]*q+kIvnD[1])*q+kIvnD[2])*q+kIvnD[3])*q+1);
+    const double numer_rem0 = prefer_fma(prefer_fma(kIvnC[1], q2, kIvnC[3]), q2, kIvnC[5]);
+    const double numer_rem1 = q * prefer_fma(prefer_fma(kIvnC[0], q2, kIvnC[2]), q2, kIvnC[4]);
+    const double denom_rem0 = prefer_fma(prefer_fma(kIvnD[0], q2, kIvnD[2]), q2, 1);
+    const double denom_rem1 = q * prefer_fma(kIvnD[1], q2, kIvnD[3]);
+    const double frac = (numer_rem0 + numer_rem1) / (denom_rem0 + denom_rem1);
+    return (pval < kIvnLow)? frac : -frac;
   }
   // Rational approximation for central region
-  q = pval - 0.5;
-  r = q*q;
-  return (((((kIvnA[0]*r+kIvnA[1])*r+kIvnA[2])*r+kIvnA[3])*r+kIvnA[4])*r+kIvnA[5])*q /
-    (((((kIvnB[0]*r+kIvnB[1])*r+kIvnB[2])*r+kIvnB[3])*r+kIvnB[4])*r+1);
+  const double q = pval - 0.5;
+  const double q2 = q*q;
+  const double q4 = q2*q2;
+  const double numer_rem1 = prefer_fma(prefer_fma(kIvnA[1], q4, kIvnA[3]), q4, kIvnA[5]);
+  const double numer_rem3 = q2 * prefer_fma(prefer_fma(kIvnA[0], q4, kIvnA[2]), q4, kIvnA[4]);
+  const double denom_rem0 = prefer_fma(prefer_fma(kIvnB[1], q4, kIvnB[3]), q4, 1);
+  const double denom_rem2 = q2 * prefer_fma(prefer_fma(kIvnB[0], q4, kIvnB[2]), q4, kIvnB[4]);
+  return q * (numer_rem1 + numer_rem3) / (denom_rem0 + denom_rem2);
 }
 
-static const double kLogFactorials[99] = {
-  0,
-  0,
-  0.69314718055994529,
-  1.791759469228055,
-  3.1780538303479458,
-  4.7874917427820458,
-  6.5792512120101012,
-  8.5251613610654129,
-  10.604602902745251,
-  12.801827480081471,
-  15.104412573075518,
-  17.502307845873887,
-  19.987214495661888,
-  22.552163853123428,
-  25.19122118273868,
-  27.89927138384089,
-  30.671860106080675,
-  33.505073450136891,
-  36.395445208033053,
-  39.339884187199495,
-  42.335616460753485,
-  45.380138898476915,
-  48.471181351835227,
-  51.606675567764377,
-  54.784729398112312,
-  58.003605222980525,
-  61.261701761002001,
-  64.557538627006323,
-  67.88974313718154,
-  71.257038967168015,
-  74.658236348830172,
-  78.092223553315307,
-  81.557959456115029,
-  85.05446701758153,
-  88.580827542197667,
-  92.136175603687093,
-  95.719694542143202,
-  99.330612454787428,
-  102.9681986145138,
-  106.63176026064346,
-  110.32063971475741,
-  114.03421178146171,
-  117.77188139974507,
-  121.53308151543862,
-  125.31727114935688,
-  129.12393363912722,
-  132.95257503561629,
-  136.80272263732635,
-  140.67392364823425,
-  144.56574394634487,
-  148.47776695177302,
-  152.40959258449737,
-  156.3608363030788,
-  160.3311282166309,
-  164.3201122631952,
-  168.32744544842768,
-  172.35279713916282,
-  176.39584840699732,
-  180.45629141754378,
-  184.53382886144945,
-  188.6281734236716,
-  192.73904728784493,
-  196.86618167289001,
-  201.00931639928149,
-  205.16819948264117,
-  209.34258675253682,
-  213.53224149456327,
-  217.73693411395425,
-  221.95644181913033,
-  226.19054832372763,
-  230.43904356577696,
-  234.70172344281826,
-  238.97838956183432,
-  243.26884900298268,
-  247.57291409618685,
-  251.89040220972319,
-  256.22113555000954,
-  260.56494097186322,
-  264.92164979855278,
-  269.29109765101975,
-  273.67312428569375,
-  278.06757344036617,
-  282.47429268763045,
-  286.89313329542699,
-  291.32395009427029,
-  295.7666013507606,
-  300.22094864701415,
-  304.68685676566872,
-  309.1641935801469,
-  313.65282994987905,
-  318.1526396202093,
-  322.66349912672621,
-  327.18528770377526,
-  331.71788719692847,
-  336.26118197919845,
-  340.81505887079902,
-  345.37940706226686,
-  349.95411804077025,
-  354.53908551944079
-};
-
-// port of Boost 1.84 implementation, double-precision
-double Lfact(double xx) {
-  if (xx < 99.0) {
-    const uint32_t uii = S_CAST(int32_t, xx);
-    return kLogFactorials[uii];
+// - If non-null, *starting_lnprobv_ddr_ptr is expected to be initialized to
+//     log(2^obs_hets / (obs_hets! obs_hom1! obs_hom2!)).
+//
+// - Returns positive value if hets := obs_hets + 2*hom_decr has higher
+//   probability than hets := obs_hets, 0 if identical probability, and
+//   negative value if lower probability.
+intptr_t HweCompare(uint32_t obs_hets, uint32_t obs_hom1, uint32_t obs_hom2, int32_t hom_decr, dd_real* starting_lnprobv_ddr_ptr, double* dbl_ptr) {
+  // From e.g. the Wigginton paper, P(N_{AB}=n_{AB} | N, n_A) is
+  //
+  //      2^{n_{AB}} N! n_A! n_B!
+  //   -----------------------------
+  //   n_{AA}! n_{AB}! n_{BB}! (2N)!
+  //
+  // Thus, P(N_{AB}=obs_hets + 2*hom_decr) / P(N_{AB}=obs_hets) is
+  //
+  //       obs_hets!         obs_hom1! * obs_hom2!      2j
+  //   ---------------- * -------------------------- * 2
+  //   (obs_hets + 2j)!   (obs_hom1-j)!(obs_hom2-j)!
+  //
+  // where j=hom_decr.
+  uint64_t numer_factorial_args[3];
+  numer_factorial_args[0] = obs_hets;
+  numer_factorial_args[1] = obs_hom1;
+  numer_factorial_args[2] = obs_hom2;
+  uint64_t denom_factorial_args[3];
+  denom_factorial_args[0] = obs_hets + 2 * hom_decr;
+  denom_factorial_args[1] = obs_hom1 - hom_decr;
+  denom_factorial_args[2] = obs_hom2 - hom_decr;
+  td_real ln_odds_ratio_tdr = _tdr_log2;
+  td_real starting_lnprobv_tdr;
+  if (starting_lnprobv_ddr_ptr == nullptr) {
+    starting_lnprobv_tdr = tdr_make1(DBL_MAX);
+  } else {
+    starting_lnprobv_tdr = tdr_make(starting_lnprobv_ddr_ptr->x[0], starting_lnprobv_ddr_ptr->x[1], DBL_MAX);
   }
-  const double zz = xx + 1;
-  double result = (log(zz + kLanczosDoubleG - 0.5) - 1) * (zz - 0.5);
-  result += log(lanczos_sum_d_expg_scaled(zz));
-  return result;
+  return CompareFactorialProducts(3, tdr_make1(2.0), hom_decr * 2LL, obs_hets, numer_factorial_args, denom_factorial_args, &starting_lnprobv_tdr, &ln_odds_ratio_tdr, dbl_ptr);
 }
 
 // obs_hets + obs_hom1 + obs_hom2 assumed to be <2^31.
-double HweLnP(int32_t obs_hets, int32_t obs_hom1, int32_t obs_hom2, uint32_t midp) {
+double HweLnP(int32_t obs_hets, int32_t obs_hom1, int32_t obs_hom2, int32_t midp) {
   // This function implements an exact SNP test of Hardy-Weinberg
   // Equilibrium as described in Wigginton, JE, Cutler, DJ, and
   // Abecasis, GR (2005) A Note on Exact Tests of Hardy-Weinberg
@@ -1791,25 +1589,44 @@ double HweLnP(int32_t obs_hets, int32_t obs_hom1, int32_t obs_hom2, uint32_t mid
   //
   // This version was written by Christopher Chang.  It contains the following
   // improvements over the original SNPHWE():
-  // - Proper handling of >64k genotypes.  Previously, there was a potential
-  //   integer overflow.
-  // - Detection and efficient handling of floating point overflow and
-  //   underflow.  E.g. instead of summing a tail all the way down, the loop
-  //   stops once the latest increment underflows the partial sum's 53-bit
-  //   precision; this results in a large speedup when max heterozygote count
-  //   >1k.
-  // - No malloc() call.  It's only necessary to keep track of a few partial
-  //   sums.
-  // - Support for the mid-p variant of this test.  See Graffelman J, Moreno V
-  //   (2013) The mid p-value in exact tests for Hardy-Weinberg equilibrium.
-  // - Log-p-value return (added Jan 2024).  A p-value of 1e-400 may be worth
-  //   distinguishing from 1e-40000 in a biobank-scale dataset.
+  // 1. Proper handling of >64k genotypes.  Previously, there was a potential
+  //    integer overflow.
+  // 2. Detection and efficient handling of floating point overflow and
+  //    underflow.  E.g. instead of summing a tail all the way down, the loop
+  //    stops once the latest increment underflows the partial sum's 53-bit
+  //    precision; this results in a large speedup when max heterozygote count
+  //    >1k.
+  // 3. No malloc() call in most cases: it's only necessary to keep track of a
+  //    few partial sums.  (But see (6).)
+  // 4. Support for the mid-p variant of this test.  See Graffelman J, Moreno V
+  //    (2013) The mid p-value in exact tests for Hardy-Weinberg equilibrium.
+  // 5. Log-p-value return (added Jan 2024).  A p-value of 1e-400 may be worth
+  //    distinguishing from 1e-40000 in a biobank-scale dataset.
+  // 6. Highly accurate handling of near-ties (added Mar-May 2026), using the
+  //    QD library.  The QD library is used to efficiently perform computations
+  //    on log-factorials with >60 bits of accuracy past the decimal point;
+  //    this lets us jump from one tail to the other with negligible accuracy
+  //    loss, and correctly resolve almost all near-ties.
+  //    (Note that we continue to allow the returned value to have a few bits
+  //    of floating-point error.  But misclassification of a near-tie can
+  //    result in a *large* relative error, so I've decided to go through the
+  //    trouble of stamping that out despite its low analytical impact.)
   //
   // Note that the HweThreshLn() function is a lot more efficient for testing
   // against a p-value inclusion threshold.  HweLnP() should only be used if
   // you need the actual p-value.
-  intptr_t obs_homc;
-  intptr_t obs_homr;
+
+  // Variables are mostly a mix of int32_ts and doubles, with a few
+  // log-factorial-sum dd_reals (i.e. double-doubles).
+  // int32 -> double casts are usually left implicit.
+  // Naming conventions:
+  // * obs_...: int32
+  // * ..._ct: int32
+  // * ..._ctd: double
+  // * ..._ddr: dd_real
+  // * Almost everything else is a double.
+  int32_t obs_homc;
+  int32_t obs_homr;
   if (obs_hom1 < obs_hom2) {
     obs_homc = obs_hom2;
     obs_homr = obs_hom1;
@@ -1817,363 +1634,458 @@ double HweLnP(int32_t obs_hets, int32_t obs_hom1, int32_t obs_hom2, uint32_t mid
     obs_homc = obs_hom1;
     obs_homr = obs_hom2;
   }
-  const int64_t rare_ct = 2LL * obs_homr + obs_hets;
+  const int32_t rare_ct = 2 * obs_homr + obs_hets;
   if (rare_ct < 2) {
-    if (midp) {
-      return -kLn2;
-    }
-    return 0;
+    return midp * (-kLn2);
   }
   // MAF: rare_ct / allele_ct
   // modal #hets:
   //   sample_ct * 2 * MAF * (1 - MAF)
   // = rare_ct * (1 - MAF)
-  const int64_t sample_ct = obs_hom1 + obs_hom2 + obs_hets;
-  const double rare_ctd = rare_ct;
-  const double sample_ctd = sample_ct;
-  const double allele_ctd = sample_ctd * 2;
-  const double maf = rare_ctd / allele_ctd;
-  const double modal_nhet = rare_ctd * (1 - maf);
-  double curr_hets = obs_hets;
-  double curr_homr = obs_homr;
-  double curr_homc = obs_homc;
-  const double c_minus_r = curr_homc - curr_homr;
-  int32_t tie_ct = 1;
-  if (curr_hets > modal_nhet) {
-    const double het_delta = curr_hets - modal_nhet;
+  const int32_t sample_ct = obs_hom1 + obs_hom2 + obs_hets;
+  // allele_ct can be >= 2^31.
+  const double allele_ctd = S_CAST(double, sample_ct * 2LL);
+  const double maf = rare_ct / allele_ctd;
+  // possible todo: check whether this type of expression is worth rewriting as
+  // e.g. prefer_fma(rare_ct, -maf, rare_ct)
+  // 'c' in cmodal_nhet is for 'continuous', i.e. the mode if we extend the
+  // likelihood function to all reals in [0, sample_ct].
+  const double cmodal_nhet = rare_ct * (1 - maf);
+  double hets = obs_hets;
+  double homr = obs_homr;
+  double homc = obs_homc;
+  double lik = 1;
+  double tail_sum = 1 - midp * 0.5;
+  if (hets > cmodal_nhet) {
+    const double het_delta = hets - cmodal_nhet;
+    // From Feb 2024 - Feb 2026, (except for the p=1 fast path) we always
+    // computed starting log-probability.  Then, if it was high enough, we
+    // proceeded with computing 1 - [sum of center probabilities]; otherwise we
+    // summed both tails in a manner that could handle probabilities < DBL_MIN.
+    //
+    // Numerical stability of both branches was investigated in Mar 2026.
+    // * The slightly-unstable 1 - [sum of center probabilities] branch was
+    //   reverted to the old cancellation-avoiding relative-likelihood
+    //   algorithm, and the entrance condition changed to het_delta < 344.
+    //   This doesn't risk center-likelihood overflow, since the
+    //   relative-likelihood of the mode is loosely bounded above by
+    //     ((172^172) / 172!)^4 ~= 5.3e+292
+    //   which leaves enough headroom to accumulate the rest of the center-sum
+    //   and multiply by e.g. allele_ct without overflowing.
+    // * Log-factorial computations in the tail-jumping branch are now
+    //   performed with "double-double" precision.  (Possible todo: benchmark
+    //   float128 on x86_64.  But web search results imply QD is better.)
     if ((!midp) && (het_delta < 2.0)) {
       // Fast path for p=1.
-      if (curr_hets * (curr_hets - 1) <= (4 * (1 + kSmallEpsilon)) * (curr_homr + 1) * (curr_homc + 1)) {
-        return 0;
+      if (obs_hets * (obs_hets - 1LL) <= 4 * (obs_homc + 1LL) * (obs_homr + 1)) {
+        return 0.0;
       }
     }
-    // Tried using old algorithm on rare_ct < 64, but this didn't make a
-    // noticeable difference to --hardy execution time on 1000 Genomes data, so
-    // I'd rather not bloat this function further.
-    // (might still be worth it due to midp use case?  revisit after chrX is
-    // working.)
-
-    // If we're close enough to the center, we may be best off computing 1 -
-    // <sum of center probabilities>.  But this approach is vulnerable to
-    // catastrophic cancellation.  Doubles have 53 bits of precision, while
-    // kSmallEpsilon (which governs equality checks) is configured to 2^{-44},
-    // so it makes sense to insist that the final subtraction does not cost us
-    // more than ~9 bits.
-    // If the starting cell has probability > 2^{-10}, that is close enough to
-    // true; and I think this catches most of the cases where we actively want
-    // to use the subtract-center strategy?
-    //
-    // From e.g. the Wigginton paper, P(N_{AB}=n_{AB} | N, n_A) is
-    //
-    //      2^{n_{AB}} N! n_A! n_B!
-    //   -----------------------------
-    //   n_{AA}! n_{AB}! n_{BB}! (2N)!
-    const double common_lnprob_component = Lfact(sample_ctd) + Lfact(rare_ctd) + Lfact(allele_ctd - rare_ctd) - Lfact(allele_ctd);
-    const double starting_lnprob_other_component = curr_hets * kLn2 - Lfact(curr_hets) - Lfact(curr_homr) - Lfact(curr_homc);
-    const double starting_lnprob = common_lnprob_component + starting_lnprob_other_component;
-    double lastp = 1;
-    // Either obs_hets >= 2, or obs_homr == obs_hets == obs_homc == 1.  In the
-    // latter case, starting_lnprob will be well over -10 * kLn2, so the other
-    // branch can assume obs_hets >= 2.
-    if (starting_lnprob > -10 * kLn2) {
-      // This condition stops triggering once we have more than ~3 million
-      // samples, but I expect it to be a significant timesaver before that
-      // point.
-      double centerp = 0;
-      // rescale this at the end.
-      while (curr_hets > 1) {
-        curr_homr += 1;
-        curr_homc += 1;
-        lastp *= (curr_hets * (curr_hets - 1)) / (4 * curr_homr * curr_homc);
-        if (lastp < 1 + kSmallEpsilon) {
-          tie_ct += (lastp > 1 - kSmallEpsilon);
-          break;
-        }
-        curr_hets -= 2;
-        centerp += lastp;
-      }
-      if (midp) {
-        centerp += S_CAST(double, tie_ct) * 0.5;
-      }
-      const double starting_prob = exp(starting_lnprob);
-      centerp *= starting_prob;
-      return log(1 - centerp);
-    }
-    double tailp = 1;
-    while (curr_homr > 0) {
-      curr_hets += 2;
-      lastp *= (4 * curr_homr * curr_homc) / (curr_hets * (curr_hets - 1));
-      curr_homr -= 1;
-      curr_homc -= 1;
-      const double preaddp = tailp;
-      tailp += lastp;
-      if (tailp <= preaddp) {
+    // Iterate outward to floating-point precision limit.
+    // No need for homr > 0 check, tail_sum == preadd will trigger when we hit
+    // 0.
+    // (hets, homr, and homc never accumulate any floating-point error since
+    // they start as small integers and are only changed by adding/subtracting
+    // 1 or 2.)
+    while (1) {
+      hets += 2;
+      lik *= (4 * homr * homc) / (hets * (hets - 1));
+      homr -= 1;
+      homc -= 1;
+      const double preadd = tail_sum;
+      tail_sum += lik;
+      if (tail_sum == preadd) {
         break;
       }
     }
+    if (het_delta < 344.0) {
+      // Jump back to starting contingency table, and iterate inward.
+      lik = 1;
+      hets = obs_hets;
+      homr = obs_homr;
+      homc = obs_homc;
+      double center_sum = midp * 0.5;
+      // No need for hets > 1 check, lik checks do what we need.
+      while (1) {
+        homr += 1;
+        homc += 1;
+        lik *= (hets * (hets - 1)) / (4 * homr * homc);
+        hets -= 2;
+        // Number of center tables is maximized with obs_hets - cmodal_nhet ~=
+        // 344, obs_homr = 0, obs_homc and obs_hets both large.
+        // Since 1 + 1/2 + ... + 1/172 < 1/173 + ... + 1/53000, we're limited
+        // to ~53000 tables.  Each lik update involves 4 operations which can
+        // each introduce up to 0.5 ULP relative error under the default
+        // rounding mode.  One ULP <= 2^{-52};
+        //   (1 + 2^{-52})^k < 1 + (k+1)2^{-52}
+        // for k < tens of millions, so in most cases we can safely add
+        // error-bounds together as long as we add an extra 2^{-52} at the
+        // beginning.
+        if (lik < 1 + 53000 * 2 * k2m52) {
+          if (lik <= 1 - 53000 * 2 * k2m52) {
+            tail_sum += lik;
+            break;
+          }
+          // Near-tie.  True value of lik can be greater than, equal to, or
+          // less than 1.
+          const int32_t hom_decr = obs_homr - S_CAST(int32_t, homr);
+          const intptr_t cmp_result = HweCompare(obs_hets, obs_homr, obs_homc, hom_decr, nullptr, &lik);
+          if (cmp_result <= 0) {
+            tail_sum += lik;
+            if (midp && (cmp_result == 0)) {
+              tail_sum -= 0.5;
+              center_sum += 0.5;
+            }
+            break;
+          }
+        }
+        center_sum += lik;
+      }
+      // Continue down tail to floating-point precision limit.
+      // No need for hets > 1 check, tail_sum == preadd check does what we need
+      // (even when hets is already -1 when entering the loop: in that case lik
+      // is 0).
+      while (1) {
+        homr += 1;
+        homc += 1;
+        lik *= (hets * (hets - 1)) / (4 * homr * homc);
+        hets -= 2;
+        const double preadd = tail_sum;
+        tail_sum += lik;
+        if (tail_sum == preadd) {
+          break;
+        }
+      }
+      return log(tail_sum / (tail_sum + center_sum));
+    }
+    // starting_lnprobv_ddr is guaranteed to be negative for hets >= 4, and no
+    // larger than ln(2) otherwise.
+    const double c_minus_r = homc - homr;
+    dd_real starting_lnprobv_ddr =
+      ddr_sub(ddr_muld(_ddr_log2, obs_hets),
+              ddr_add3_lfacts(obs_homr, obs_hets, obs_homc));
     // Now we want to jump near the other tail, without evaluating that many
-    // terms in between.
+    // contingency table log-probabilities along the way.
     //
-    // Each full log-likelihood evaluation requires 3 Lfact() calls.  Lfact()
-    // tends to be ~2-3 times as expensive as log in my testing, and I've seen
-    // log be anywhere from ~3 to ~12 times as expensive as division, so we
-    // want to limit ourselves to 1-2 full evaluations most of the time.
+    // Each full log-probability evaluation requires 3 ddr_lfact() calls.
+    // Since they are now performed with extra precision, they require hundreds
+    // of floating-point operations, so we want to limit ourselves to 1-2 full
+    // evaluations most of the time.  (Possible todo: use lower-accuracy
+    // Lfact() to jump around, followed by ddr_lfact() when exiting the loop.
+    // Should be an easy performance win, but there's a complexity cost so I'll
+    // wait until I see a scenario where this branch executes frequently...)
     //
-    // The current heuristic starts by reflecting (obs_homr + curr_homr) * 0.5
-    // across the mode, performing a full log-likelihood check at the nearest
-    // valid point.  Hopefully we find that we're in (starting_lnprob - 62 *
-    // kLn2, starting_lnprob], so we're at or near a cell that actually
-    // contributes to the tail-sum.  (This window is chosen to be wide enough
-    // to guarantee that at least one point falls inside when sample_ct <
-    // 2^31.)
+    // The current heuristic starts by reflecting (obs_homr + homr) * 0.5
+    // across the (continuous) mode, performing a full log-probability check at
+    // an adjacent valid point.  Hopefully we find that we're in
+    // (starting_lnprob - 62 * kLn2, starting_lnprob], so we're at or near a
+    // table that actually contributes to the tail-sum float64.  (This window
+    // is chosen to be wide enough to guarantee that at least one point falls
+    // inside when sample_ct < 2^31.)
     //
     // If not, we jump again, using Newton's method.
-    // If curr_homr is too low (i.e. current log-likelihood is too high), when
-    // we increase curr_homr by 1, the likelihood gets multiplied by
-    //   curr_hets * (curr_hets-1) / (4 * (curr_homr+1) * (curr_homc+1))
-    // i.e. we're adding the logarithm of this value to the log-likelihood.
-    // If curr_homr is too high, when we decrease curr_homr by 1, the
-    // likelihood gets multiplied by
-    //   4 * curr_homr * curr_homc / ((curr_hets+2) * (curr_hets+1))
+    // If homr is too low (i.e. current log-probability is too high), when we
+    // increase homr by 1, the probability gets multiplied by
+    //   hets * (hets-1) / (4 * (homr+1) * (homc+1))
+    // i.e. we're adding the logarithm of this value to the log-probability.
+    // If homr is too high, when we decrease homr by 1, the probability gets
+    // multiplied by
+    //   4 * homr * homc / ((hets+2) * (hets+1))
     // We use the log of the first expression as the Newton's method f'(x) when
-    // we're jumping to higher curr_homr, and the negative-log of the second
-    // expression when we're jumping to lower curr_homr.
+    // we're jumping to higher homr, and the negative-log of the second
+    // expression when we're jumping to lower homr.
     // f''(x) is always negative, so we can aim for starting_lnprob instead of
     // the middle of the interval.
 
-    // curr_hets moves twice as fast as curr_homr.  So if we add
-    //   0.5 * (curr_hets + S_CAST(double, obs_hets)) - modal_nhet
-    // to 0.5 * (curr_homr + S_CAST(double, obs_homr)), that reflects curr_homr
-    // across the mode.
-    const double max_homr = S_CAST(double, rare_ct / 2);
+    // hets moves twice as fast as homr.  So if we add
+    //   0.5 * (hets + obs_hets) - cmodal_nhet
+    // to 0.5 * (homr + obs_homr), that reflects homr across the cmode.
+    const double max_homr = S_CAST(double, rare_ct >> 1);
     {
-      const double delta = 0.5 * (curr_hets + S_CAST(double, obs_hets)) - modal_nhet;
-      curr_homr = 0.5 * (curr_homr + S_CAST(double, obs_homr)) + delta;
+      const double delta = 0.5 * (hets + obs_hets) - cmodal_nhet;
+      homr = 0.5 * (homr + obs_homr) + delta;
       // Round up (to guarantee we've actually moved to the other side of the
-      // mode) and clamp.
-      curr_homr = S_CAST(double, S_CAST(int32_t, curr_homr + 1));
-      if (curr_homr > max_homr) {
-        curr_homr = max_homr;
-      }
+      // cmode) and clamp.
+      homr = ceil_limit(homr, max_homr);
     }
-    // starting_lnprob_other_component is guaranteed to be positive here.
-    // Lfact() should be accurate enough for us to use a smaller-than-usual
-    // epsilon for identifying ties here; this isn't enough to cancel out the
-    // effective increase in epsilon from working in log-space, but it helps.
-    const double max_diff = MAXV(k2m47, starting_lnprob_other_component * k2m47);
+    // 'f' in lnprobf refers to fixed component of log-probability (unchanged
+    // when rare_ct and sample_ct are held constant), 'v' refers to variable
+    // component
+    const dd_real lnprobf_ddr =
+      ddr_sub(ddr_add3_lfacts(rare_ct, sample_ct, allele_ctd - rare_ct),
+              ddr_lfact(allele_ctd));
+    const double starting_lnprob = ddr_add(lnprobf_ddr, starting_lnprobv_ddr).x[0];
     while (1) {
-      curr_hets = rare_ctd - curr_homr * 2;
-      curr_homc = curr_homr + c_minus_r;
-      const double lnprob_other_component = curr_hets * kLn2 - Lfact(curr_hets) - Lfact(curr_homr) - Lfact(curr_homc);
-      const double lnprob_diff = lnprob_other_component - starting_lnprob_other_component;
-      if (lnprob_diff > max_diff) {
-        if (curr_homr >= max_homr) {
-          // All terms on this tail are larger than the starting term.  Exit.
+      hets = rare_ct - homr * 2;
+      homc = homr + c_minus_r;
+      const dd_real lnprobv_ddr =
+        ddr_sub(ddr_muld(_ddr_log2, hets),
+                ddr_add3_lfacts(homr, hets, homc));
+      const double lnprobv_diff = ddr_sub(lnprobv_ddr, starting_lnprobv_ddr).x[0];
+      // Could tighten this threshold further.  But code is correct as long as
+      // we're guaranteed to enter the "lik < 2 - one_minus_scaled_eps" branch
+      // for positive lnprobv_diff.
+      if (lnprobv_diff >= k2m60) {
+        if (homr == max_homr) {
+          // All tables on this tail are larger than the starting table.  Exit.
           // (This is possible when obs_hom1 == obs_hom2 == 0.)
-          if (midp) {
-            tailp -= 0.5;
-          }
-          return starting_lnprob + log(tailp);
+          return starting_lnprob + log(tail_sum);
         }
-        const double ll_deriv = log(curr_hets * (curr_hets - 1) / (4 * (curr_homr + 1) * (curr_homc + 1)));
+        const double lnprobv_deriv = log(hets * (hets - 1) / (4 * (homr + 1) * (homc + 1)));
         // Round absolute value up, to guarantee that we make progress.
-        // (lnprob_diff is positive and ll_deriv is negative.)
+        // (lnprobv_diff is positive and lnprobv_deriv is negative.)
         // This may overshoot.  But the function is guaranteed to terminate
         // because we never overshoot (and we do always make progress on each
         // step) once we're on the other side.
-        curr_homr += 1 - S_CAST(int64_t, (1 - kSmallEpsilon) * lnprob_diff / ll_deriv);
-        if (curr_homr > max_homr) {
-          curr_homr = max_homr;
+        homr += ceil(-lnprobv_diff / lnprobv_deriv);
+        if (homr > max_homr) {
+          homr = max_homr;
         }
-      } else if (lnprob_diff > -62 * kLn2) {
-        lastp = exp(lnprob_diff);
+      } else if (lnprobv_diff > -62 * kLn2) {
+        lik = exp(lnprobv_diff);
         break;
       } else {
-        const double ll_deriv = log((curr_hets + 2) * (curr_hets + 1) / (4 * curr_homr * curr_homc));
+        const double lnprobv_deriv = log((hets + 2) * (hets + 1) / (4 * homr * homc));
         // Round down, to guarantee we don't overshoot.
-        // We're guaranteed to make progress, since lnprob_diff >= 62 * log(2)
-        // and sample_ct < 2^31.
-        curr_homr -= S_CAST(int64_t, lnprob_diff / ll_deriv);
-        assert(curr_homr >= 0);
+        // We're guaranteed to make progress, since lnprobv_diff <=
+        // -62 * log(2) and sample_ct < 2^31.
+        homr -= S_CAST(int64_t, lnprobv_diff / lnprobv_deriv);
       }
     }
-    // Sum toward center, until lastp >= 1 or we're about to double-count the
-    // starting cell (possible when midp true).
-    double lastp_tail = lastp;
-    if (lastp < 1 - k2m34) {
-      const double starting_homr_p1 = obs_homr + 1;
-      double curr_homr_center = curr_homr;
-      double curr_homc_center = curr_homc;
-      double curr_hets_center = curr_hets;
-      while (curr_homr_center > starting_homr_p1) {
-        tailp += lastp;
-        curr_hets_center += 2;
-        lastp *= (4 * curr_homr_center * curr_homc_center) / (curr_hets_center * (curr_hets_center - 1));
-        if (lastp >= 1 - k2m34) {
-          break;
+    // Sum toward center, until lik >= 1.  (No more risk of double-counting the
+    // starting table, since we don't enter this branch at all unless the
+    // starting table is >= 172 steps from the cmode.)
+    //
+    // lik should be accurate to 3 ULP as we enter this loop (max 1.5 ULP
+    // observed error from exp, tiny bit over 0.5 from lnprobv_diff, we round
+    // up all the way to 3 so we don't have to worry about "2 -
+    // one_minus_scaled_eps" rounding behavior), so near-tie detection can use
+    // a tight epsilon here.
+    double one_minus_scaled_eps = 1 - 3 * k2m52;
+    // Save where we're starting on this tail, which isn't necessarily on the
+    // boundary.  We sum inward until relative-likelihood > 1, then we jump
+    // back to tailenter_{hets,homr,homc} and sum outward.
+    const double tailenter_lik = lik;
+    const double tailenter_homr = homr;
+    const double tailenter_homc = homc;
+    const double tailenter_hets = hets;
+    while (lik <= one_minus_scaled_eps) {
+      tail_sum += lik;
+      hets += 2;
+      lik *= (4 * homr * homc) / (hets * (hets - 1));
+      homr -= 1;
+      homc -= 1;
+      one_minus_scaled_eps -= 2 * k2m52;
+    }
+    if (lik < 2 - one_minus_scaled_eps) {
+      const int32_t hom_decr = obs_homr - S_CAST(int32_t, homr);
+      const intptr_t cmp_result = HweCompare(obs_hets, obs_homr, obs_homc, hom_decr, &starting_lnprobv_ddr, &lik);
+      if (cmp_result <= 0) {
+        tail_sum += lik;
+        if (midp && (cmp_result == 0)) {
+          tail_sum -= 0.5;
         }
-        curr_homr_center -= 1;
-        curr_homc_center -= 1;
       }
-    }
-    if ((lastp >= 1 - k2m34) && (lastp <= 1 + k2m34)) {
-      tailp += lastp;
-      ++tie_ct;
     }
     // Sum away from center, until sums stop changing.
+    lik = tailenter_lik;
+    homr = tailenter_homr;
+    homc = tailenter_homc;
+    hets = tailenter_hets;
     while (1) {
-      curr_homr += 1;
-      curr_homc += 1;
-      lastp_tail *= (curr_hets * (curr_hets - 1)) / (4 * curr_homr * curr_homc);
-      const double preaddp = tailp;
-      tailp += lastp_tail;
-      if (tailp <= preaddp) {
+      homr += 1;
+      homc += 1;
+      lik *= (hets * (hets - 1)) / (4 * homr * homc);
+      const double preadd = tail_sum;
+      tail_sum += lik;
+      if (tail_sum == preadd) {
         break;
       }
-      curr_hets -= 2;
+      hets -= 2;
     }
-    if (midp) {
-      tailp -= S_CAST(double, tie_ct) * 0.5;
-    }
-    return starting_lnprob + log(tailp);
+    return starting_lnprob + log(tail_sum);
   }
   // Same as above, just with directions flipped.
-  const double het_delta = modal_nhet - curr_hets;
+  const double het_delta = cmodal_nhet - hets;
   if ((!midp) && (het_delta < 2.0)) {
     // Fast path for p=1.
-    if ((4 * (1 - kSmallEpsilon)) * curr_homr * curr_homc <= (curr_hets + 2) * (curr_hets + 1)) {
-      return 0;
+    if ((4LL * obs_homr) * obs_homc <= (obs_hets + 2LL) * (obs_hets + 1LL)) {
+      return 0.0;
     }
   }
-  const double common_lnprob_component = Lfact(sample_ctd) + Lfact(rare_ctd) + Lfact(allele_ctd - rare_ctd) - Lfact(allele_ctd);
-  const double starting_lnprob_other_component = curr_hets * kLn2 - Lfact(curr_hets) - Lfact(curr_homr) - Lfact(curr_homc);
-  const double starting_lnprob = common_lnprob_component + starting_lnprob_other_component;
-  double lastp = 1;
-  if (starting_lnprob > -10 * kLn2) {
-    double centerp = 0;
-    // rescale this at the end.
-    while (curr_homr > 0.5) {
-      curr_hets += 2;
-      lastp *= 4 * curr_homr * curr_homc / (curr_hets * (curr_hets - 1));
-      curr_homr -= 1;
-      curr_homc -= 1;
-      if (lastp < 1 + kSmallEpsilon) {
-        tie_ct += (lastp > 1 - kSmallEpsilon);
-        break;
-      }
-      centerp += lastp;
-    }
-    if (midp) {
-      centerp += S_CAST(double, tie_ct) * 0.5;
-    }
-    const double starting_prob = exp(starting_lnprob);
-    centerp *= starting_prob;
-    return log(1 - centerp);
-  }
-  double tailp = 1;
-  while (curr_hets > 1) {
-    curr_homr += 1;
-    curr_homc += 1;
-    lastp *= curr_hets * (curr_hets - 1) / (4 * curr_homr * curr_homc);
-    curr_hets -= 2;
-    const double preaddp = tailp;
-    tailp += lastp;
-    if (tailp <= preaddp) {
+  // Iterate outward to floating-point precision limit.
+  while (1) {
+    homr += 1;
+    homc += 1;
+    lik *= (hets * (hets - 1)) / (4 * homr * homc);
+    hets -= 2;
+    const double preadd = tail_sum;
+    tail_sum += lik;
+    if (tail_sum == preadd) {
       break;
     }
   }
+  if (het_delta < 344.0) {
+    // Jump back to starting table, and iterate inward.
+    lik = 1;
+    hets = obs_hets;
+    homr = obs_homr;
+    homc = obs_homc;
+    double center_sum = midp * 0.5;
+    // No need for hets > 1 check, lik checks do what we need.
+    while (1) {
+      hets += 2;
+      lik *= (4 * homr * homc) / (hets * (hets - 1));
+      homr -= 1;
+      homc -= 1;
+      // If we're 172 steps from the center, number of center tables is limited
+      // to ~2*172 = 344, when obs_homr ~= obs_homc.
+      if (lik < 1 + (344 * 2 + 1) * k2m52) {
+        if (lik <= 1 - (344 * 2 + 1) * k2m52) {
+          tail_sum += lik;
+          break;
+        }
+        // Near-tie.  True value of lik can be greater than, equal to, or less
+        // than 1.
+        const int32_t hom_decr = obs_homr - S_CAST(int32_t, homr);
+        const intptr_t cmp_result = HweCompare(obs_hets, obs_homr, obs_homc, hom_decr, nullptr, &lik);
+        if (cmp_result <= 0) {
+          tail_sum += lik;
+          if (midp && (cmp_result == 0)) {
+            tail_sum -= 0.5;
+            center_sum += 0.5;
+          }
+          break;
+        }
+      }
+      center_sum += lik;
+    }
+    // Continue down tail to floating-point precision limit.
+    while (1) {
+      hets += 2;
+      lik *= (4 * homr * homc) / (hets * (hets - 1));
+      homr -= 1;
+      homc -= 1;
+      const double preadd = tail_sum;
+      tail_sum += lik;
+      if (tail_sum == preadd) {
+        break;
+      }
+    }
+    return log(tail_sum / (tail_sum + center_sum));
+  }
+  const double c_minus_r = homc - homr;
+  dd_real starting_lnprobv_ddr =
+    ddr_sub(ddr_muld(_ddr_log2, obs_hets),
+            ddr_add3_lfacts(obs_homr, obs_hets, obs_homc));
   // Jump to other tail.
   {
-    const double delta = modal_nhet - 0.5 * (curr_hets + S_CAST(double, obs_hets));
-    curr_homr = 0.5 * (curr_homr + S_CAST(double, obs_homr)) - delta;
+    const double delta = cmodal_nhet - 0.5 * (hets + obs_hets);
+    homr = 0.5 * (homr + obs_homr) - delta;
     // Round down (to guarantee we've actually moved to the other side of the
-    // mode) and clamp.
-    curr_homr = S_CAST(double, S_CAST(int32_t, curr_homr));
-    if (curr_homr < 0) {
-      curr_homr = 0;
+    // cmode) and clamp.
+    homr = S_CAST(int32_t, homr);
+    if (homr < 0) {
+      homr = 0;
     }
   }
-  const double max_diff = MAXV(k2m47, starting_lnprob_other_component * k2m47);
 #ifndef NDEBUG
-  const double max_homr = S_CAST(double, rare_ct / 2);
+  const double max_homr = S_CAST(double, rare_ct >> 1);
 #endif
+  const dd_real lnprobf_ddr =
+    ddr_sub(ddr_add3_lfacts(rare_ct, sample_ct, allele_ctd - rare_ct),
+            ddr_lfact(allele_ctd));
+  const double starting_lnprob = ddr_add(lnprobf_ddr, starting_lnprobv_ddr).x[0];
   while (1) {
-    curr_hets = rare_ctd - curr_homr * 2;
-    curr_homc = curr_homr + c_minus_r;
-    const double lnprob_other_component = curr_hets * kLn2 - Lfact(curr_hets) - Lfact(curr_homr) - Lfact(curr_homc);
-    const double lnprob_diff = lnprob_other_component - starting_lnprob_other_component;
-    if (lnprob_diff > max_diff) {
-      if (curr_homr <= 0) {
-        // All terms on this tail are larger than the starting term.  Exit.
-        if (midp) {
-          tailp -= 0.5;
-        }
-        return starting_lnprob + log(tailp);
+    hets = rare_ct - homr * 2;
+    homc = homr + c_minus_r;
+    const dd_real lnprobv_ddr =
+      ddr_sub(ddr_muld(_ddr_log2, hets),
+              ddr_add3_lfacts(homr, hets, homc));
+    const double lnprobv_diff = ddr_sub(lnprobv_ddr, starting_lnprobv_ddr).x[0];
+    if (lnprobv_diff >= k2m60) {
+      if (homr == 0) {
+        // All tables on this tail have higher probability than the starting
+        // table.  Exit.
+        return starting_lnprob + log(tail_sum);
       }
-      const double ll_deriv = log(4 * curr_homr * curr_homc / ((curr_hets + 2) * (curr_hets + 1)));
-      curr_homr += S_CAST(int64_t, (1 - kSmallEpsilon) * lnprob_diff / ll_deriv) - 1;
-      if (curr_homr < 0) {
-        curr_homr = 0;
+      const double lnprobv_deriv = log(4 * homr * homc / ((hets + 2) * (hets + 1)));
+      homr -= ceil(-lnprobv_diff / lnprobv_deriv);
+      if (homr < 0) {
+        homr = 0;
       }
-    } else if (lnprob_diff > -62 * kLn2) {
-      lastp = exp(lnprob_diff);
+    } else if (lnprobv_diff > -62 * kLn2) {
+      lik = exp(lnprobv_diff);
       break;
     } else {
-      const double ll_deriv = log(4 * (curr_homr + 1) * (curr_homc + 1) / (curr_hets * (curr_hets - 1)));
-      curr_homr += S_CAST(int64_t, lnprob_diff / ll_deriv);
-      assert(curr_homr <= max_homr);
+      const double lnprobv_deriv = log(4 * (homr + 1) * (homc + 1) / (hets * (hets - 1)));
+      homr += S_CAST(int64_t, lnprobv_diff / lnprobv_deriv);
+      assert(homr <= max_homr);
     }
   }
-  // Sum toward center, until lastp >= 1 or we're about to double-count the
-  // starting cell.
-  double lastp_tail = lastp;
-  if (lastp < 1 - k2m34) {
-    const double starting_homr_m1 = obs_homr - 1;
-    double curr_homr_center = curr_homr;
-    double curr_homc_center = curr_homc;
-    double curr_hets_center = curr_hets;
-    while (curr_homr_center < starting_homr_m1) {
-      tailp += lastp;
-      curr_homr_center += 1;
-      curr_homc_center += 1;
-      lastp *= curr_hets_center * (curr_hets_center - 1) / (4 * curr_homr_center * curr_homc_center);
-      if (lastp >= 1 - k2m34) {
-        break;
+  // Sum toward center, until lik >= 1.
+  double one_minus_scaled_eps = 1 - 3 * k2m52;
+  const double tailenter_lik = lik;
+  const double tailenter_homr = homr;
+  const double tailenter_homc = homc;
+  const double tailenter_hets = hets;
+  while (lik <= one_minus_scaled_eps) {
+    tail_sum += lik;
+    homr += 1;
+    homc += 1;
+    lik *= hets * (hets - 1) / (4 * homr * homc);
+    hets -= 2;
+    one_minus_scaled_eps -= 2 * k2m52;
+  }
+  if (lik < 2 - one_minus_scaled_eps) {
+    const int32_t hom_decr = obs_homr - S_CAST(int32_t, homr);
+    const intptr_t cmp_result = HweCompare(obs_hets, obs_homr, obs_homc, hom_decr, &starting_lnprobv_ddr, &lik);
+    if (cmp_result <= 0) {
+      tail_sum += lik;
+      if (midp && (cmp_result == 0)) {
+        tail_sum -= 0.5;
       }
-      curr_hets_center -= 2;
     }
-  }
-  if ((lastp >= 1 - k2m34) && (lastp <= 1 + k2m34)) {
-    tailp += lastp;
-    ++tie_ct;
   }
   // Sum away from center, until sums stop changing.
+  lik = tailenter_lik;
+  homr = tailenter_homr;
+  homc = tailenter_homc;
+  hets = tailenter_hets;
   while (1) {
-    curr_hets += 2;
-    lastp_tail *= 4 * curr_homr * curr_homc / (curr_hets * (curr_hets - 1));
-    const double preaddp = tailp;
-    tailp += lastp_tail;
-    if (tailp <= preaddp) {
+    hets += 2;
+    lik *= 4 * homr * homc / (hets * (hets - 1));
+    const double preadd = tail_sum;
+    tail_sum += lik;
+    if (tail_sum == preadd) {
       break;
     }
-    curr_homr -= 1;
-    curr_homc -= 1;
+    homr -= 1;
+    homc -= 1;
   }
-  if (midp) {
-    tailp -= S_CAST(double, tie_ct) * 0.5;
-  }
-  return starting_lnprob + log(tailp);
+  return starting_lnprob + log(tail_sum);
 }
 
-uint32_t HweThresh(int32_t obs_hets, int32_t obs_hom1, int32_t obs_hom2, double thresh) {
-  // Threshold-test-only version of HweP() which is usually able to exit
-  // from the calculation earlier.  Returns 0 if these counts are close enough
-  // to Hardy-Weinberg equilibrium, 1 otherwise.
+// 2^{-83} bias to give plink 1.9-style exact tests maximum ability to
+// determine tiny p-values.  (~2^{-53} is necessary to take advantage of
+// denormalized small numbers, then allow tail sum to be up to 2^30.  ...okay,
+// HweThresh[Midp]() is not responsible for denormal values of thresh, and
+// plink2 now just flushes denormals to zero.  But configuring this
+// constant to be compatible with them doesn't cost us anything.)
+static const double kExactTestBias = k2m50 / (1LL << 33);
+
+uint32_t HweThresh(int32_t obs_hets, int32_t obs_hom1, int32_t obs_hom2, double pval_thresh) {
+  // Threshold-test-only version of HweLnP() which is usually able to exit
+  // from the calculation earlier.  Assumes DBL_MIN <= pval_thresh <= 1 (note
+  // that some older versions of this function didn't handle pval_thresh=1
+  // correctly, and plink2 still avoids calling this with pval_thresh=1).
+  // Returns 0 if these counts are close enough to Hardy-Weinberg equilibrium,
+  // 1 otherwise.
   //
   // Suppose, for definiteness, that the number of observed hets is no less
   // than expectation.  (Same ideas apply for the other case.)  We proceed as
   // follows:
-  // - Sum the *relative* likelihoods of more likely smaller het counts.
+  // - Sum the *relative* likelihoods of more-likely smaller het counts.
   // - Determine the minimum tail mass to pass the threshold.
   // - The majority of the time, the tail boundary elements are enough to pass
   //   the threshold; we never need to sum the remainder of the tails.
@@ -2183,8 +2095,8 @@ uint32_t HweThresh(int32_t obs_hets, int32_t obs_hom1, int32_t obs_hom2, double 
   //   upper-bound the tail sums.
   // - Only when neither of these conditions hold do we start traveling down
   //   the tails.
-  intptr_t obs_homc;
-  intptr_t obs_homr;
+  int32_t obs_homc;
+  int32_t obs_homr;
   if (obs_hom1 < obs_hom2) {
     obs_homc = obs_hom2;
     obs_homr = obs_hom1;
@@ -2192,39 +2104,29 @@ uint32_t HweThresh(int32_t obs_hets, int32_t obs_hom1, int32_t obs_hom2, double 
     obs_homc = obs_hom1;
     obs_homr = obs_hom2;
   }
-  int64_t rare_copies = 2LL * obs_homr + obs_hets;
-  int64_t genotypes2 = (obs_hets + obs_homc + obs_homr) * 2LL;
-  double curr_hets_t2 = obs_hets;  // tail 2
-  double curr_homr_t2 = obs_homr;
-  double curr_homc_t2 = obs_homc;
-
-  // Subtract epsilon from initial probability mass, so that we can compare to
-  // 1 when determining tail vs. center membership without floating point error
-  // biting us in the ass
-  double tailp1 = (1 - kSmallEpsilon) * kExactTestBias;
-  double centerp = 0;
-  double lastp2 = tailp1;
-  double tailp2 = 0;
-  double tail1_ceil;
-  double tail2_ceil;
-  double lastp1;
-  double curr_hets_t1;
-  double curr_homr_t1;
-  double curr_homc_t1;
-
-  // Initially, if center sum reaches this, the test can immediately fail.
-  // Once center is summed, this is recalculated, and when tail sum has reached
-  // this, we've passed.
-  double exit_thresh;
-  double exit_threshx;
-  double ratio;
-  double preaddp;
+  const int64_t genotypes2 = (obs_hets + obs_homc + obs_homr) * 2LL;
   if (!genotypes2) {
     return 0;
   }
+  const int32_t rare_copies = 2 * obs_homr + obs_hets;
+  double hets_t2 = obs_hets;  // tail 2
+  double homr_t2 = obs_homr;
+  double homc_t2 = obs_homc;
 
-  // Convert thresh into reverse odds ratio.
-  thresh = (1 - thresh) / thresh;
+  double tail_sum1 = kExactTestBias;
+  double center_sum = 0;
+  double lik2 = tail_sum1;
+  double tail_sum2 = 0;
+
+  // const double center_div_tail_thresh = (1 - pval_thresh) / pval_thresh;
+  // An initial upper bound on the tail sum is useful, since it lets us
+  // report test failure before summing the entire center.  We use the
+  // trivial bound of 1 + floor(rare_copies / 2): that's the total number
+  // of possible het counts, and the relative likelihood for each count must be
+  // <= 1 if it's in the tail.
+  const double center_div_tail_thresh = (1 - pval_thresh) / pval_thresh;
+  const double center_sum_exit_thresh = u31tod(1 + (rare_copies >> 1)) * (center_div_tail_thresh * kExactTestBias);
+  double scaled_one_plus_eps = kExactTestBias * (1 + k2m52);
 
   // Expected het count:
   //   2 * rarefreq * (1 - rarefreq) * genotypes
@@ -2239,173 +2141,200 @@ uint32_t HweThresh(int32_t obs_hets, int32_t obs_hom1, int32_t obs_hom2, double 
   // to maintain the same allele frequencies.
   // This probability is always decreasing when proceeding away from the
   // expected het count.
-
   if (obs_hets * genotypes2 > rare_copies * (genotypes2 - rare_copies)) {
-    // tail 1 = upper
+    // tail 1 = upper hets
     if (obs_hets < 2) {
       return 0;
     }
 
-    // An initial upper bound on the tail sum is useful, since it lets us
-    // report test failure before summing the entire center.  We use the
-    // trivial bound of 1 + floor(rare_copies / 2): that's the total number
-    // of possible het counts, and the relative probability for each count must
-    // be <= 1 if it's in the tail.
-    exit_thresh = (1 + (rare_copies / 2)) * (thresh * kExactTestBias);
-
-    // het_probs[curr_hets] = 1
-    // het_probs[curr_hets - 2] = het_probs[curr_hets] * curr_hets * (curr_hets - 1) / (4 * (curr_homr + 1) * (curr_homc + 1))
+    // het_probs[hets] = 1
+    // het_probs[hets - 2] = het_probs[hets] * hets * (hets - 1) / (4 * (homr + 1) * (homc + 1))
     do {
-      curr_homr_t2 += 1;
-      curr_homc_t2 += 1;
-      lastp2 *= (curr_hets_t2 * (curr_hets_t2 - 1)) / (4 * curr_homr_t2 * curr_homc_t2);
-      curr_hets_t2 -= 2;
-      if (lastp2 < kExactTestBias) {
-        tailp2 = lastp2;
-        break;
+      homr_t2 += 1;
+      homc_t2 += 1;
+      lik2 *= (hets_t2 * (hets_t2 - 1)) / (4 * homr_t2 * homc_t2);
+      hets_t2 -= 2;
+      scaled_one_plus_eps += kExactTestBias * 2 * k2m52;
+      if (lik2 < scaled_one_plus_eps) {
+        if (lik2 <= 2 * kExactTestBias - scaled_one_plus_eps) {
+          tail_sum2 = lik2;
+          break;
+        }
+        double unshifted_lik = lik2 * (1.0 / kExactTestBias);
+        const int32_t hom_decr = obs_homr - S_CAST(int32_t, homr_t2);
+        const intptr_t cmp_result = HweCompare(obs_hets, obs_homr, obs_homc, hom_decr, nullptr, &unshifted_lik);
+        lik2 = unshifted_lik * kExactTestBias;
+        if (cmp_result <= 0) {
+          tail_sum2 = lik2;
+          break;
+        }
+        // HweCompare() could have computed unshifted_like using
+        // exp(lnprobv_diff).  We are conservatively assuming that exp()
+        // introduces up to 1.5 ULP error, and lnprobv_diff may be off by
+        // slightly over 0.5 ULP.
+        scaled_one_plus_eps = kExactTestBias * (1 + 3 * k2m52);
       }
-      centerp += lastp2;
-      if (centerp > exit_thresh) {
+      center_sum += lik2;
+      if (center_sum >= center_sum_exit_thresh) {
         return 1;
       }
-    } while (curr_hets_t2 > 1.5);
-    exit_thresh = centerp / thresh;
-    if (tailp1 + tailp2 >= exit_thresh) {
+    } while (hets_t2 > 1);
+    // hets_t2 guaranteed to be nonnegative on loop exit, so ratio
+    // calculation works
+
+    // This is NaN when pval_thresh=1, so we write the next if-condition to be
+    // true on NaN.
+    const double tail_sum_exit_thresh = center_sum / center_div_tail_thresh;
+    if (!(tail_sum1 + tail_sum2 < tail_sum_exit_thresh)) {
       return 0;
     }
     // c + cr + cr^2 + ... = c/(1-r), which is an upper bound for the tail sum
-    ratio = (curr_hets_t2 * (curr_hets_t2 - 1)) / (4 * (curr_homr_t2 + 1) * (curr_homc_t2 + 1));
-    tail2_ceil = tailp2 / (1 - ratio);
-    curr_hets_t1 = obs_hets + 2;
-    curr_homr_t1 = obs_homr;
-    curr_homc_t1 = obs_homc;
+    const double ratio = (hets_t2 * (hets_t2 - 1)) / (4 * (homr_t2 + 1) * (homc_t2 + 1));
+    const double tail2_ceil = tail_sum2 / (1 - ratio);
+    double hets_t1 = obs_hets + 2;
+    double homr_t1 = obs_homr;
+    double homc_t1 = obs_homc;
     // ratio for the other tail
-    lastp1 = (4 * curr_homr_t1 * curr_homc_t1) / (curr_hets_t1 * (curr_hets_t1 - 1));
-    tail1_ceil = tailp1 / (1 - lastp1);
-    if (tail1_ceil + tail2_ceil < exit_thresh) {
+    double lik1 = (4 * homr_t1 * homc_t1) / (hets_t1 * (hets_t1 - 1));
+    const double tail1_ceil = tail_sum1 / (1 - lik1);
+    if (tail1_ceil + tail2_ceil < tail_sum_exit_thresh) {
       return 1;
     }
-    lastp1 *= tailp1;
-    tailp1 += lastp1;
+    lik1 *= tail_sum1;
+    tail_sum1 += lik1;
 
     if (obs_homr > 1) {
-      // het_probs[curr_hets + 2] = het_probs[curr_hets] * 4 * curr_homr * curr_homc / ((curr_hets + 2) * (curr_hets + 1))
-      exit_threshx = exit_thresh - tailp2;
-      do {
-        curr_hets_t1 += 2;
-        curr_homr_t1 -= 1;
-        curr_homc_t1 -= 1;
-        lastp1 *= (4 * curr_homr_t1 * curr_homc_t1) / (curr_hets_t1 * (curr_hets_t1 - 1));
-        preaddp = tailp1;
-        tailp1 += lastp1;
-        if (tailp1 > exit_threshx) {
+      // het_probs[hets + 2] = het_probs[hets] * 4 * homr * homc / ((hets + 2) * (hets + 1))
+      const double tail_sum1_exit_thresh = tail_sum_exit_thresh - tail_sum2;
+      while (1) {
+        hets_t1 += 2;
+        homr_t1 -= 1;
+        homc_t1 -= 1;
+        lik1 *= (4 * homr_t1 * homc_t1) / (hets_t1 * (hets_t1 - 1));
+        const double preadd = tail_sum1;
+        tail_sum1 += lik1;
+        if (tail_sum1 >= tail_sum1_exit_thresh) {
           return 0;
         }
-        if (tailp1 <= preaddp) {
+        // homr_t1 == 1 check isn't necessary for correctness, but it provides
+        // a noticeable speedup in my testing on real data.
+        if ((tail_sum1 == preadd) || (homr_t1 == 1)) {
           break;
         }
-      } while (curr_homr_t1 > 1.5);
+      }
     }
-    if (tailp1 + tail2_ceil < exit_thresh) {
+    if (tail_sum1 + tail2_ceil < tail_sum_exit_thresh) {
       return 1;
     }
-    exit_threshx = exit_thresh - tailp1;
-    while (curr_hets_t2 > 1) {
-      curr_homr_t2 += 1;
-      curr_homc_t2 += 1;
-      lastp2 *= (curr_hets_t2 * (curr_hets_t2 - 1)) / (4 * curr_homr_t2 * curr_homc_t2);
-      preaddp = tailp2;
-      tailp2 += lastp2;
-      if (tailp2 >= exit_threshx) {
+    const double tail_sum2_exit_thresh = tail_sum_exit_thresh - tail_sum1;
+    while (1) {
+      homr_t2 += 1;
+      homc_t2 += 1;
+      lik2 *= (hets_t2 * (hets_t2 - 1)) / (4 * homr_t2 * homc_t2);
+      const double preadd = tail_sum2;
+      tail_sum2 += lik2;
+      if (tail_sum2 >= tail_sum2_exit_thresh) {
         return 0;
       }
-      if (tailp2 <= preaddp) {
+      if (tail_sum2 == preadd) {
         return 1;
       }
-      curr_hets_t2 -= 2;
+      hets_t2 -= 2;
     }
-    return 1;
   }
-  // tail 1 = lower
+  // tail 1 = lower hets
   if (!obs_homr) {
     return 0;
   }
-  exit_thresh = (1 + (rare_copies / 2)) * (thresh * kExactTestBias);
   do {
-    curr_hets_t2 += 2;
-    lastp2 *= (4 * curr_homr_t2 * curr_homc_t2) / (curr_hets_t2 * (curr_hets_t2 - 1));
-    curr_homr_t2 -= 1;
-    curr_homc_t2 -= 1;
-    if (lastp2 < kExactTestBias) {
-      tailp2 = lastp2;
-      break;
-    }
-    centerp += lastp2;
-    if (centerp > exit_thresh) {
-      return 1;
-    }
-  } while (curr_homr_t2 > 0.5);
-  exit_thresh = centerp / thresh;
-  if (tailp1 + tailp2 >= exit_thresh) {
-    return 0;
-  }
-  ratio = (4 * curr_homr_t2 * curr_homc_t2) / ((curr_hets_t2 + 2) * (curr_hets_t2 + 1));
-  tail2_ceil = tailp2 / (1 - ratio);
-  curr_hets_t1 = obs_hets;
-  curr_homr_t1 = obs_homr + 1;
-  curr_homc_t1 = obs_homc + 1;
-  lastp1 = (curr_hets_t1 * (curr_hets_t1 - 1)) / (4 * curr_homr_t1 * curr_homc_t1);
-  tail1_ceil = tailp1 / (1 - lastp1);
-  lastp1 *= tailp1;
-  tailp1 += lastp1;
-
-  if (tail1_ceil + tail2_ceil < exit_thresh) {
-    return 1;
-  }
-  if (obs_hets >= 4) {
-    exit_threshx = exit_thresh - tailp2;
-    do {
-      curr_hets_t1 -= 2;
-      curr_homr_t1 += 1;
-      curr_homc_t1 += 1;
-      lastp1 *= (curr_hets_t1 * (curr_hets_t1 - 1)) / (4 * curr_homr_t1 * curr_homc_t1);
-      preaddp = tailp1;
-      tailp1 += lastp1;
-      if (tailp1 > exit_threshx) {
-        return 0;
-      }
-      if (tailp1 <= preaddp) {
+    hets_t2 += 2;
+    lik2 *= (4 * homr_t2 * homc_t2) / (hets_t2 * (hets_t2 - 1));
+    homr_t2 -= 1;
+    homc_t2 -= 1;
+    scaled_one_plus_eps += kExactTestBias * 2 * k2m52;
+    if (lik2 < scaled_one_plus_eps) {
+      if (lik2 <= 2 * kExactTestBias - scaled_one_plus_eps) {
+        tail_sum2 = lik2;
         break;
       }
-    } while (curr_hets_t1 > 3.5);
+      double unshifted_lik = lik2 * (1.0 / kExactTestBias);
+      const int32_t hom_decr = obs_homr - S_CAST(int32_t, homr_t2);
+      const intptr_t cmp_result = HweCompare(obs_hets, obs_homr, obs_homc, hom_decr, nullptr, &unshifted_lik);
+      lik2 = unshifted_lik * kExactTestBias;
+      if (cmp_result <= 0) {
+        tail_sum2 = lik2;
+        break;
+      }
+      scaled_one_plus_eps = kExactTestBias * (1 + 3 * k2m52);
+    }
+    center_sum += lik2;
+    if (center_sum >= center_sum_exit_thresh) {
+      return 1;
+    }
+  } while (homr_t2 > 0);
+  // homr_t2 guaranteed to be nonnegative on loop exit, so ratio
+  // calculation works
+
+  const double tail_sum_exit_thresh = center_sum / center_div_tail_thresh;
+  if (!(tail_sum1 + tail_sum2 < tail_sum_exit_thresh)) {
+    return 0;
   }
-  if (tailp1 + tail2_ceil < exit_thresh) {
+  const double ratio = (4 * homr_t2 * homc_t2) / ((hets_t2 + 2) * (hets_t2 + 1));
+  const double tail2_ceil = tail_sum2 / (1 - ratio);
+  double hets_t1 = obs_hets;
+  double homr_t1 = obs_homr + 1;
+  double homc_t1 = obs_homc + 1;
+  double lik1 = (hets_t1 * (hets_t1 - 1)) / (4 * homr_t1 * homc_t1);
+  const double tail1_ceil = tail_sum1 / (1 - lik1);
+  if (tail1_ceil + tail2_ceil < tail_sum_exit_thresh) {
     return 1;
   }
-  exit_threshx = exit_thresh - tailp1;
-  while (curr_homr_t2 > 0.5) {
-    curr_hets_t2 += 2;
-    lastp2 *= (4 * curr_homr_t2 * curr_homc_t2) / (curr_hets_t2 * (curr_hets_t2 - 1));
-    curr_homr_t2 -= 1;
-    curr_homc_t2 -= 1;
-    preaddp = tailp2;
-    tailp2 += lastp2;
-    if (tailp2 >= exit_threshx) {
+  lik1 *= tail_sum1;
+  tail_sum1 += lik1;
+
+  if (obs_hets >= 4) {
+    const double tail_sum1_exit_thresh = tail_sum_exit_thresh - tail_sum2;
+    while (1) {
+      hets_t1 -= 2;
+      homr_t1 += 1;
+      homc_t1 += 1;
+      lik1 *= (hets_t1 * (hets_t1 - 1)) / (4 * homr_t1 * homc_t1);
+      const double preadd = tail_sum1;
+      tail_sum1 += lik1;
+      if (tail_sum1 >= tail_sum1_exit_thresh) {
+        return 0;
+      }
+      if ((tail_sum1 == preadd) || (hets_t1 < 4)) {
+        break;
+      }
+    }
+  }
+  if (tail_sum1 + tail2_ceil < tail_sum_exit_thresh) {
+    return 1;
+  }
+  const double tail_sum2_exit_thresh = tail_sum_exit_thresh - tail_sum1;
+  while (1) {
+    hets_t2 += 2;
+    lik2 *= (4 * homr_t2 * homc_t2) / (hets_t2 * (hets_t2 - 1));
+    homr_t2 -= 1;
+    homc_t2 -= 1;
+    const double preadd = tail_sum2;
+    tail_sum2 += lik2;
+    if (tail_sum2 >= tail_sum2_exit_thresh) {
       return 0;
     }
-    if (tailp2 <= preaddp) {
+    if (tail_sum2 == preadd) {
       return 1;
     }
   }
-  return 1;
 }
 
-uint32_t HweThreshMidp(int32_t obs_hets, int32_t obs_hom1, int32_t obs_hom2, double thresh) {
+uint32_t HweThreshMidp(int32_t obs_hets, int32_t obs_hom1, int32_t obs_hom2, double pval_thresh) {
   // Mid-p version of HweThresh().  (There are enough fiddly differences that I
-  // think it's better for this to be a separate function.)  Assumes threshold
-  // is smaller than 0.5.
-  intptr_t obs_homc;
-  intptr_t obs_homr;
+  // think it's better for this to be a separate function.)  Assumes
+  // DBL_MIN <= pval_thresh < 0.5.
+  int32_t obs_homc;
+  int32_t obs_homr;
   if (obs_hom1 < obs_hom2) {
     obs_homc = obs_hom2;
     obs_homr = obs_hom1;
@@ -2413,202 +2342,215 @@ uint32_t HweThreshMidp(int32_t obs_hets, int32_t obs_hom1, int32_t obs_hom2, dou
     obs_homc = obs_hom1;
     obs_homr = obs_hom2;
   }
-  int64_t rare_copies = 2LL * obs_homr + obs_hets;
-  int64_t genotypes2 = (obs_hets + obs_homc + obs_homr) * 2LL;
-  double curr_hets_t2 = obs_hets;  // tail 2
-  double curr_homr_t2 = obs_homr;
-  double curr_homc_t2 = obs_homc;
-  double tailp1 = (1 - kSmallEpsilon) * kExactTestBias * 0.5;
-  double centerp = tailp1;
-  double lastp2 = (1 - kSmallEpsilon) * kExactTestBias;
-  double tailp2 = 0;
-  double tail1_ceil;
-  double tail2_ceil;
-  double lastp1;
-  double curr_hets_t1;
-  double curr_homr_t1;
-  double curr_homc_t1;
-  double exit_thresh;
-  double exit_threshx;
-  double ratio;
-  double preaddp;
+  const int64_t genotypes2 = (obs_hets + obs_homc + obs_homr) * 2LL;
   if (!genotypes2) {
     return 0;
   }
-  thresh = (1 - thresh) / thresh;
+  int32_t rare_copies = 2 * obs_homr + obs_hets;
+  double hets_t2 = obs_hets;  // tail 2
+  double homr_t2 = obs_homr;
+  double homc_t2 = obs_homc;
+  double tail_sum1 = kExactTestBias * 0.5;
+  double center_sum = tail_sum1;
+  double lik2 = kExactTestBias;
+  double tail_sum2 = 0;
+  const double center_div_tail_thresh = (1 - pval_thresh) / pval_thresh;
+  const double center_sum_exit_thresh = u31tod(1 + (rare_copies >> 1)) * (center_div_tail_thresh * kExactTestBias);
+  double scaled_one_plus_eps = kExactTestBias * (1 + k2m52);
   if (obs_hets * genotypes2 > rare_copies * (genotypes2 - rare_copies)) {
     if (obs_hets < 2) {
       return 0;
     }
-    exit_thresh = (1 + (rare_copies / 2)) * (thresh * kExactTestBias);
     do {
-      curr_homr_t2 += 1;
-      curr_homc_t2 += 1;
-      lastp2 *= (curr_hets_t2 * (curr_hets_t2 - 1)) / (4 * curr_homr_t2 * curr_homc_t2);
-      curr_hets_t2 -= 2;
-      if (lastp2 < kExactTestBias) {
-        if (lastp2 > (1 - 2 * kSmallEpsilon) * kExactTestBias) {
-          // tie with original contingency table, apply mid-p correction here
-          // too
-          tailp2 = tailp1;
-          centerp += tailp1;
-        } else {
-          tailp2 = lastp2;
-        }
-        break;
-      }
-      centerp += lastp2;
-      if (centerp > exit_thresh) {
-        return 1;
-      }
-    } while (curr_hets_t2 > 1.5);
-    exit_thresh = centerp / thresh;
-    if (tailp1 + tailp2 >= exit_thresh) {
-      return 0;
-    }
-    ratio = (curr_hets_t2 * (curr_hets_t2 - 1)) / (4 * (curr_homr_t2 + 1) * (curr_homc_t2 + 1));
-    // this needs to work in both the tie and no-tie cases
-    tail2_ceil = tailp2 + lastp2 * ratio / (1 - ratio);
-    curr_hets_t1 = obs_hets + 2;
-    curr_homr_t1 = obs_homr;
-    curr_homc_t1 = obs_homc;
-    lastp1 = (4 * curr_homr_t1 * curr_homc_t1) / (curr_hets_t1 * (curr_hets_t1 - 1));
-    // always a tie here
-    tail1_ceil = tailp1 * 2 / (1 - lastp1) - tailp1;
-    if (tail1_ceil + tail2_ceil < exit_thresh) {
-      return 1;
-    }
-    lastp1 *= tailp1 * 2;
-    tailp1 += lastp1;
-
-    if (obs_homr > 1) {
-      exit_threshx = exit_thresh - tailp2;
-      do {
-        curr_hets_t1 += 2;
-        curr_homr_t1 -= 1;
-        curr_homc_t1 -= 1;
-        lastp1 *= (4 * curr_homr_t1 * curr_homc_t1) / (curr_hets_t1 * (curr_hets_t1 - 1));
-        preaddp = tailp1;
-        tailp1 += lastp1;
-        if (tailp1 > exit_threshx) {
-          return 0;
-        }
-        if (tailp1 <= preaddp) {
+      homr_t2 += 1;
+      homc_t2 += 1;
+      lik2 *= (hets_t2 * (hets_t2 - 1)) / (4 * homr_t2 * homc_t2);
+      hets_t2 -= 2;
+      scaled_one_plus_eps += kExactTestBias * 2 * k2m52;
+      if (lik2 < scaled_one_plus_eps) {
+        if (lik2 <= 2 * kExactTestBias - scaled_one_plus_eps) {
+          tail_sum2 = lik2;
           break;
         }
-      } while (curr_homr_t1 > 1.5);
-    }
-    if (tailp1 + tail2_ceil < exit_thresh) {
-      return 1;
-    }
-    exit_threshx = exit_thresh - tailp1;
-    while (curr_hets_t2 > 1) {
-      curr_homr_t2 += 1;
-      curr_homc_t2 += 1;
-      lastp2 *= (curr_hets_t2 * (curr_hets_t2 - 1)) / (4 * curr_homr_t2 * curr_homc_t2);
-      preaddp = tailp2;
-      tailp2 += lastp2;
-      if (tailp2 >= exit_threshx) {
-        return 0;
+        double lik = lik2 * (1.0 / kExactTestBias);
+        const int32_t hom_decr = obs_homr - S_CAST(int32_t, homr_t2);
+        const intptr_t cmp_result = HweCompare(obs_hets, obs_homr, obs_homc, hom_decr, nullptr, &lik);
+        lik2 = lik * kExactTestBias;
+        if (cmp_result <= 0) {
+          if (cmp_result == 0) {
+            tail_sum2 = tail_sum1;
+            center_sum += tail_sum1;
+          } else {
+            tail_sum2 = lik2;
+          }
+          break;
+        }
+        scaled_one_plus_eps = kExactTestBias * (1 + 3 * k2m52);
       }
-      if (tailp2 <= preaddp) {
+      center_sum += lik2;
+      if (center_sum >= center_sum_exit_thresh) {
         return 1;
       }
-      curr_hets_t2 -= 2;
+    } while (hets_t2 > 1);
+
+    const double tail_sum_exit_thresh = center_sum / center_div_tail_thresh;
+    if (!(tail_sum1 + tail_sum2 < tail_sum_exit_thresh)) {
+      return 0;
     }
-    return 1;
+    const double ratio = (hets_t2 * (hets_t2 - 1)) / (4 * (homr_t2 + 1) * (homc_t2 + 1));
+    // this needs to work in both the tie and no-tie cases
+    const double tail2_ceil = prefer_fma(lik2, ratio / (1 - ratio), tail_sum2);
+    double hets_t1 = obs_hets + 2;
+    double homr_t1 = obs_homr;
+    double homc_t1 = obs_homc;
+    double lik1 = (4 * homr_t1 * homc_t1) / (hets_t1 * (hets_t1 - 1));
+    // always a tie here
+    const double tail1_ceil = (tail_sum1 * 2) / (1 - lik1) - tail_sum1;
+    if (tail1_ceil + tail2_ceil < tail_sum_exit_thresh) {
+      return 1;
+    }
+    lik1 *= tail_sum1 * 2;
+    tail_sum1 += lik1;
+
+    if (obs_homr > 1) {
+      const double tail_sum1_exit_thresh = tail_sum_exit_thresh - tail_sum2;
+      while (1) {
+        hets_t1 += 2;
+        homr_t1 -= 1;
+        homc_t1 -= 1;
+        lik1 *= (4 * homr_t1 * homc_t1) / (hets_t1 * (hets_t1 - 1));
+        const double preadd = tail_sum1;
+        tail_sum1 += lik1;
+        if (tail_sum1 >= tail_sum1_exit_thresh) {
+          return 0;
+        }
+        if ((tail_sum1 == preadd) || (homr_t1 == 1)) {
+          break;
+        }
+      }
+    }
+    if (tail_sum1 + tail2_ceil < tail_sum_exit_thresh) {
+      return 1;
+    }
+    const double tail_sum2_exit_thresh = tail_sum_exit_thresh - tail_sum1;
+    while (1) {
+      homr_t2 += 1;
+      homc_t2 += 1;
+      lik2 *= (hets_t2 * (hets_t2 - 1)) / (4 * homr_t2 * homc_t2);
+      const double preadd = tail_sum2;
+      tail_sum2 += lik2;
+      if (tail_sum2 >= tail_sum2_exit_thresh) {
+        return 0;
+      }
+      if (tail_sum2 == preadd) {
+        return 1;
+      }
+      hets_t2 -= 2;
+    }
   }
   if (!obs_homr) {
     return 0;
   }
-  exit_thresh = (1 + (rare_copies / 2)) * (thresh * kExactTestBias);
   do {
-    curr_hets_t2 += 2;
-    lastp2 *= (4 * curr_homr_t2 * curr_homc_t2) / (curr_hets_t2 * (curr_hets_t2 - 1));
-    curr_homr_t2 -= 1;
-    curr_homc_t2 -= 1;
-    if (lastp2 < kExactTestBias) {
-      if (lastp2 > (1 - 2 * kSmallEpsilon) * kExactTestBias) {
-        tailp2 = tailp1;
-        centerp += tailp1;
-      } else {
-        tailp2 = lastp2;
+    hets_t2 += 2;
+    lik2 *= (4 * homr_t2 * homc_t2) / (hets_t2 * (hets_t2 - 1));
+    homr_t2 -= 1;
+    homc_t2 -= 1;
+    scaled_one_plus_eps += kExactTestBias * 2 * k2m52;
+    if (lik2 < scaled_one_plus_eps) {
+      if (lik2 <= 2 - scaled_one_plus_eps) {
+        tail_sum2 = lik2;
+        break;
       }
-      break;
+      double lik = lik2 * (1.0 / kExactTestBias);
+      const int32_t hom_decr = obs_homr - S_CAST(int32_t, homr_t2);
+      const intptr_t cmp_result = HweCompare(obs_hets, obs_homr, obs_homc, hom_decr, nullptr, &lik);
+      lik2 = lik * kExactTestBias;
+      if (cmp_result <= 0) {
+        if (cmp_result == 0) {
+          tail_sum2 = tail_sum1;
+          center_sum += tail_sum1;
+        } else {
+          tail_sum2 = lik2;
+        }
+        break;
+      }
+      scaled_one_plus_eps = kExactTestBias * (1 + 3 * k2m52);
     }
-    centerp += lastp2;
-    if (centerp > exit_thresh) {
+    center_sum += lik2;
+    if (center_sum >= center_sum_exit_thresh) {
       return 1;
     }
-  } while (curr_homr_t2 > 0.5);
-  exit_thresh = centerp / thresh;
-  if (tailp1 + tailp2 >= exit_thresh) {
+  } while (homr_t2 > 0);
+
+  const double tail_sum_exit_thresh = center_sum / center_div_tail_thresh;
+  if (!(tail_sum1 + tail_sum2 < tail_sum_exit_thresh)) {
     return 0;
   }
-  ratio = (4 * curr_homr_t2 * curr_homc_t2) / ((curr_hets_t2 + 2) * (curr_hets_t2 + 1));
-  tail2_ceil = tailp2 + lastp2 * ratio / (1 - ratio);
-  curr_hets_t1 = obs_hets;
-  curr_homr_t1 = obs_homr + 1;
-  curr_homc_t1 = obs_homc + 1;
-  lastp1 = (curr_hets_t1 * (curr_hets_t1 - 1)) / (4 * curr_homr_t1 * curr_homc_t1);
-  tail1_ceil = 2 * tailp1 / (1 - lastp1) - tailp1;
-  lastp1 *= 2 * tailp1;
-  tailp1 += lastp1;
+  const double ratio = (4 * homr_t2 * homc_t2) / ((hets_t2 + 2) * (hets_t2 + 1));
+  const double tail2_ceil = prefer_fma(lik2, ratio / (1 - ratio), tail_sum2);
+  double hets_t1 = obs_hets;
+  double homr_t1 = obs_homr + 1;
+  double homc_t1 = obs_homc + 1;
+  double lik1 = (hets_t1 * (hets_t1 - 1)) / (4 * homr_t1 * homc_t1);
+  const double tail1_ceil = (2 * tail_sum1) / (1 - lik1) - tail_sum1;
+  lik1 *= 2 * tail_sum1;
+  tail_sum1 += lik1;
 
-  if (tail1_ceil + tail2_ceil < exit_thresh) {
+  if (tail1_ceil + tail2_ceil < tail_sum_exit_thresh) {
     return 1;
   }
   if (obs_hets >= 4) {
-    exit_threshx = exit_thresh - tailp2;
-    do {
-      curr_hets_t1 -= 2;
-      curr_homr_t1 += 1;
-      curr_homc_t1 += 1;
-      lastp1 *= (curr_hets_t1 * (curr_hets_t1 - 1)) / (4 * curr_homr_t1 * curr_homc_t1);
-      preaddp = tailp1;
-      tailp1 += lastp1;
-      if (tailp1 > exit_threshx) {
+    const double tail_sum1_exit_thresh = tail_sum_exit_thresh - tail_sum2;
+    while (1) {
+      hets_t1 -= 2;
+      homr_t1 += 1;
+      homc_t1 += 1;
+      lik1 *= (hets_t1 * (hets_t1 - 1)) / (4 * homr_t1 * homc_t1);
+      const double preadd = tail_sum1;
+      tail_sum1 += lik1;
+      if (tail_sum1 >= tail_sum1_exit_thresh) {
         return 0;
       }
-      if (tailp1 <= preaddp) {
+      if ((tail_sum1 == preadd) || (hets_t1 < 4)) {
         break;
       }
-    } while (curr_hets_t1 > 3.5);
+    }
   }
-  if (tailp1 + tail2_ceil < exit_thresh) {
+  if (tail_sum1 + tail2_ceil < tail_sum_exit_thresh) {
     return 1;
   }
-  exit_threshx = exit_thresh - tailp1;
-  while (curr_homr_t2 > 0.5) {
-    curr_hets_t2 += 2;
-    lastp2 *= (4 * curr_homr_t2 * curr_homc_t2) / (curr_hets_t2 * (curr_hets_t2 - 1));
-    curr_homr_t2 -= 1;
-    curr_homc_t2 -= 1;
-    preaddp = tailp2;
-    tailp2 += lastp2;
-    if (tailp2 >= exit_threshx) {
+  const double tail_sum2_exit_thresh = tail_sum_exit_thresh - tail_sum1;
+  while (1) {
+    hets_t2 += 2;
+    lik2 *= (4 * homr_t2 * homc_t2) / (hets_t2 * (hets_t2 - 1));
+    homr_t2 -= 1;
+    homc_t2 -= 1;
+    const double preadd = tail_sum2;
+    tail_sum2 += lik2;
+    if (tail_sum2 >= tail_sum2_exit_thresh) {
       return 0;
     }
-    if (tailp2 <= preaddp) {
+    if (tail_sum2 == preadd) {
       return 1;
     }
   }
-  return 1;
 }
 
-uint32_t HweThreshLnMain(int32_t obs_hets, int32_t obs_hom1, int32_t obs_hom2, uint32_t midp, double ln_thresh) {
+uint32_t HweThreshLnMain(int32_t obs_hets, int32_t obs_hom1, int32_t obs_hom2, int32_t midp, double ln_thresh) {
   assert(ln_thresh < -708);
   // Threshold-test-only version of HweLnP() which is usually able to exit
-  // from the calculation earlier.  Returns 0 if these counts are close enough
-  // to Hardy-Weinberg equilibrium, 1 otherwise.
+  // from the calculation earlier.  Returns *out_of_eqp=0 if these counts are
+  // close enough to Hardy-Weinberg equilibrium, 1 otherwise.
   //
-  // Assumes ln_thresh < -708.
+  // Assumes ln_thresh < -708, otherwise the |curr_hets - cmodal_nhet| < 344
+  // early-exit doesn't work.  (possible todo: make the 344 constant a function
+  // of ln_thresh, and set it closer to optimally.)
   //
   // Caller is responsible for including a tolerance in ln_thresh when
-  // appropriate; the only tolerance applied by this function is in the context
-  // of other-tail tie detection.
-  intptr_t obs_homc;
-  intptr_t obs_homr;
+  // appropriate.
+  int32_t obs_homc;
+  int32_t obs_homr;
   if (obs_hom1 < obs_hom2) {
     obs_homc = obs_hom2;
     obs_homr = obs_hom1;
@@ -2616,972 +2558,1401 @@ uint32_t HweThreshLnMain(int32_t obs_hets, int32_t obs_hom1, int32_t obs_hom2, u
     obs_homc = obs_hom1;
     obs_homr = obs_hom2;
   }
-  const int64_t rare_ct = 2LL * obs_homr + obs_hets;
+  const int32_t rare_ct = 2 * obs_homr + obs_hets;
+  const int32_t sample_ct = obs_hom1 + obs_hom2 + obs_hets;
+  const double allele_ctd = S_CAST(double, sample_ct * 2LL);
+  const double maf = rare_ct / allele_ctd;
+  const double cmodal_nhet = rare_ct * (1 - maf);
+  double hets = obs_hets;
   // Change this to "rare_ct < 2" if ln_thresh restriction is being loosened
   // (to e.g. compare results against HweThresh()).
-  // TODO: also look at |obs_hets - modal_nhet|, bsru32(sample_ct)
-  if (rare_ct < 64) {
+  if (fabs(hets - cmodal_nhet) < 344.0) {
     return 0;
   }
-  const int64_t sample_ct = obs_hom1 + obs_hom2 + obs_hets;
-  const double rare_ctd = rare_ct;
-  const double sample_ctd = sample_ct;
-  const double allele_ctd = sample_ctd * 2;
 
-  // 1. Compute log-likelihood of test cell.  This may be high enough on its
-  //    own to immediately return 0.
-  //    If likelihood is lower than threshold / <total # of cells>, we can
+  // 1. Compute log-probability of starting table.  This may be high enough on
+  //    its own to immediately return 0.
+  //    If probability is lower than threshold / <total # of tables>, we can
   //    immediately return 1.
   // 2. Determine tailsum we must hit to return 0.
   // 3. The rest follows HweLnP(), except with an extra geometric-series-based
   //    early-exit attempt near the end.
-  const double common_lnprob_component = Lfact(sample_ctd) + Lfact(rare_ctd) + Lfact(allele_ctd - rare_ctd) - Lfact(allele_ctd);
-  double curr_hets = obs_hets;
-  double curr_homr = obs_homr;
-  double curr_homc = obs_homc;
-  const double starting_lnprob_other_component = curr_hets * kLn2 - Lfact(curr_hets) - Lfact(curr_homr) - Lfact(curr_homc);
-  const double starting_lnprob = common_lnprob_component + starting_lnprob_other_component;
-  const double midp_d = u31tod(midp);
-  if (ln_thresh <= starting_lnprob - midp_d * kLn2) {
+  const dd_real lnprobf_ddr =
+    ddr_sub(ddr_add3_lfacts(rare_ct, sample_ct, allele_ctd - rare_ct),
+            ddr_lfact(allele_ctd));
+  double homr = obs_homr;
+  double homc = obs_homc;
+  dd_real starting_lnprobv_ddr =
+    ddr_sub(ddr_muld(_ddr_log2, hets),
+            ddr_add3_lfacts(homr, hets, homc));
+  const double starting_lnprob = ddr_add(lnprobf_ddr, starting_lnprobv_ddr).x[0];
+  if (ln_thresh <= starting_lnprob - midp * kLn2) {
     return 0;
   }
-  const double max_homr = S_CAST(double, rare_ct / 2);
-  if (ln_thresh > starting_lnprob + log(max_homr + 1 - midp_d * 0.5)) {
+  const double max_homr = S_CAST(double, rare_ct >> 1);
+  if (ln_thresh > starting_lnprob + log(max_homr + 1 - midp * 0.5)) {
     return 1;
   }
 
-  const double maf = rare_ctd / allele_ctd;
-  const double modal_nhet = rare_ctd * (1 - maf);
-  const double c_minus_r = curr_homc - curr_homr;
+  const double c_minus_r = homc - homr;
   // This should be in (0.5, 2^30].
   const double tail_thresh = exp(ln_thresh - starting_lnprob);
-  double tailp = 1 - midp_d * 0.5;
-  double lastp = 1;
-  if (curr_hets > modal_nhet) {
+  double tail_sum = 1 - midp * 0.5;
+  double lik = 1;
+  if (hets > cmodal_nhet) {
     // No center-sum (or p=1) code path, since it doesn't make sense to choose
     // a HWE threshold that makes these relevant; we should have already
     // returned 0.
     // (So we can't assume obs_hets >= 2.)
-    curr_hets += 2;
-    while (curr_homr > 0.5) {
-      lastp *= (4 * curr_homr * curr_homc) / (curr_hets * (curr_hets - 1));
-      const double preaddp = tailp;
-      tailp += lastp;
-      if (tailp <= preaddp) {
+    while (1) {
+      hets += 2;
+      lik *= (4 * homr * homc) / (hets * (hets - 1));
+      const double preadd = tail_sum;
+      tail_sum += lik;
+      if (tail_sum == preadd) {
         break;
       }
-      if (tailp >= tail_thresh) {
+      if (tail_sum >= tail_thresh) {
         return 0;
       }
-      curr_hets += 2;
-      curr_homr -= 1;
-      curr_homc -= 1;
+      homr -= 1;
+      homc -= 1;
     }
     {
-      const double delta = 0.5 * (curr_hets + S_CAST(double, obs_hets)) - modal_nhet;
-      curr_homr = 0.5 * (curr_homr + S_CAST(double, obs_homr)) + delta;
-      curr_homr = S_CAST(double, S_CAST(int32_t, curr_homr + 0.5));
-      if (curr_homr > max_homr) {
-        curr_homr = max_homr;
-      }
+      const double delta = 0.5 * (hets + obs_hets) - cmodal_nhet;
+      homr = 0.5 * (homr + obs_homr) + delta;
+      homr = ceil_limit(homr, max_homr);
     }
-    const double max_diff = MAXV(k2m47, fabs(starting_lnprob_other_component) * k2m47);
     while (1) {
-      curr_hets = rare_ctd - curr_homr * 2;
-      curr_homc = curr_homr + c_minus_r;
-      const double lnprob_other_component = curr_hets * kLn2 - Lfact(curr_hets) - Lfact(curr_homr) - Lfact(curr_homc);
-      const double lnprob_diff = lnprob_other_component - starting_lnprob_other_component;
-      if (lnprob_diff > max_diff) {
-        if (curr_homr >= max_homr) {
+      hets = rare_ct - homr * 2;
+      homc = homr + c_minus_r;
+      const dd_real lnprobv_ddr =
+        ddr_sub(ddr_muld(_ddr_log2, hets),
+                ddr_add3_lfacts(homr, hets, homc));
+      const double lnprobv_diff = ddr_sub(lnprobv_ddr, starting_lnprobv_ddr).x[0];
+      if (lnprobv_diff >= k2m60) {
+        if (homr == max_homr) {
           return 1;
         }
-        const double ll_deriv = log(curr_hets * (curr_hets - 1) / (4 * (curr_homr + 1) * (curr_homc + 1)));
-        curr_homr += 1 - S_CAST(int64_t, (1 - kSmallEpsilon) * lnprob_diff / ll_deriv);
-        if (curr_homr > max_homr) {
-          curr_homr = max_homr;
+        const double lnprobv_deriv = log(hets * (hets - 1) / (4 * (homr + 1) * (homc + 1)));
+        homr += ceil(-lnprobv_diff / lnprobv_deriv);
+        if (homr > max_homr) {
+          homr = max_homr;
         }
-      } else if (lnprob_diff > -62 * kLn2) {
-        lastp = exp(lnprob_diff);
+      } else if (lnprobv_diff > -62 * kLn2) {
+        lik = exp(lnprobv_diff);
         break;
       } else {
-        const double ll_deriv = log((curr_hets + 2) * (curr_hets + 1) / (4 * curr_homr * curr_homc));
-        curr_homr -= S_CAST(int64_t, lnprob_diff / ll_deriv);
-        if (curr_homr < 0) {
-          curr_homr = 0;
-        }
+        const double lnprobv_deriv = log((hets + 2) * (hets + 1) / (4 * homr * homc));
+        homr -= S_CAST(int64_t, lnprobv_diff / lnprobv_deriv);
+        assert(homr >= 0);
       }
     }
-    double lastp_tail = lastp;
-    if (lastp < 1 - k2m34) {
-      double curr_homr_center = curr_homr;
-      double curr_homc_center = curr_homc;
-      double curr_hets_center = curr_hets;
-      while (1) {
-        tailp += lastp;
-        if (tailp >= tail_thresh) {
+    double one_minus_scaled_eps = 1 - 3 * k2m52;
+    const double tailenter_lik = lik;
+    const double tailenter_homr = homr;
+    const double tailenter_homc = homc;
+    const double tailenter_hets = hets;
+    while (lik <= one_minus_scaled_eps) {
+      tail_sum += lik;
+      if (tail_sum >= tail_thresh) {
+        return 0;
+      }
+      hets += 2;
+      lik *= (4 * homr * homc) / (hets * (hets - 1));
+      homr -= 1;
+      homc -= 1;
+      one_minus_scaled_eps -= 2 * k2m52;
+    }
+    if (lik < 2 - one_minus_scaled_eps) {
+      const int32_t hom_decr = obs_homr - S_CAST(int32_t, homr);
+      const intptr_t cmp_result = HweCompare(obs_hets, obs_homr, obs_homc, hom_decr, &starting_lnprobv_ddr, &lik);
+      if (cmp_result <= 0) {
+        if (cmp_result == 0) {
+          tail_sum += 1 - midp * 0.5;
+        } else {
+          tail_sum += lik;
+        }
+        if (tail_sum >= tail_thresh) {
           return 0;
         }
-        curr_hets_center += 2;
-        lastp *= (4 * curr_homr_center * curr_homc_center) / (curr_hets_center * (curr_hets_center - 1));
-        if (lastp >= 1 - k2m34) {
-          break;
-        }
-        curr_homr_center -= 1;
-        curr_homc_center -= 1;
-      }
-    }
-    if (lastp <= 1 + k2m34) {
-      tailp += lastp * (1 - midp_d * 0.5);
-      if (tailp >= tail_thresh) {
-        return 0;
       }
     }
     // We're down to one tail that can be tightly bounded by a geometric
     // series.  (ratio is always decreasing)
     // c + cr + cr^2 + ... = c/(1-r)
-    curr_homr += 1;
-    curr_homc += 1;
-    const double cur_ratio = (curr_hets * (curr_hets - 1)) / (4 * curr_homr * curr_homc);
-    lastp_tail *= cur_ratio;
-    const double remaining_ceil = lastp_tail / (1 - cur_ratio);
-    if (tailp + remaining_ceil < tail_thresh) {
+    lik = tailenter_lik;
+    homr = tailenter_homr;
+    homc = tailenter_homc;
+    hets = tailenter_hets;
+
+    homr += 1;
+    homc += 1;
+    const double cur_ratio = (hets * (hets - 1)) / (4 * homr * homc);
+    lik *= cur_ratio;
+    const double remaining_ceil = tailenter_lik / (1 - cur_ratio);
+    if (tail_sum + remaining_ceil < tail_thresh) {
       return 1;
     }
     while (1) {
-      const double preaddp = tailp;
-      tailp += lastp_tail;
-      if (tailp <= preaddp) {
+      const double preadd = tail_sum;
+      tail_sum += lik;
+      if (tail_sum == preadd) {
         return 1;
       }
-      if (tailp >= tail_thresh) {
+      if (tail_sum >= tail_thresh) {
         return 0;
       }
-      curr_hets -= 2;
-      curr_homr += 1;
-      curr_homc += 1;
-      lastp_tail *= (curr_hets * (curr_hets - 1)) / (4 * curr_homr * curr_homc);
+      hets -= 2;
+      homr += 1;
+      homc += 1;
+      lik *= (hets * (hets - 1)) / (4 * homr * homc);
     }
     // unreachable
   }
-  while (curr_hets > 1) {
-    curr_homr += 1;
-    curr_homc += 1;
-    lastp *= curr_hets * (curr_hets - 1) / (4 * curr_homr * curr_homc);
-    curr_hets -= 2;
-    const double preaddp = tailp;
-    tailp += lastp;
-    if (tailp <= preaddp) {
+  while (1) {
+    homr += 1;
+    homc += 1;
+    lik *= hets * (hets - 1) / (4 * homr * homc);
+    hets -= 2;
+    const double preadd = tail_sum;
+    tail_sum += lik;
+    if (tail_sum == preadd) {
       break;
     }
-    if (tailp >= tail_thresh) {
+    if (tail_sum >= tail_thresh) {
       return 0;
     }
   }
   {
-    const double delta = modal_nhet - 0.5 * (curr_hets + S_CAST(double, obs_hets));
-    curr_homr = 0.5 * (curr_homr + S_CAST(double, obs_homr)) - delta;
-    curr_homr = S_CAST(double, S_CAST(int32_t, curr_homr + 0.5));
-    if (curr_homr < 0) {
-      curr_homr = 0;
+    const double delta = cmodal_nhet - 0.5 * (hets + obs_hets);
+    homr = 0.5 * (homr + obs_homr) - delta;
+    homr = S_CAST(int32_t, homr);
+    if (homr < 0) {
+      homr = 0;
     }
   }
-  const double max_diff = MAXV(k2m47, fabs(starting_lnprob_other_component) * k2m47);
   while (1) {
-    curr_hets = rare_ctd - curr_homr * 2;
-    curr_homc = curr_homr + c_minus_r;
-    const double lnprob_other_component = curr_hets * kLn2 - Lfact(curr_hets) - Lfact(curr_homr) - Lfact(curr_homc);
-    const double lnprob_diff = lnprob_other_component - starting_lnprob_other_component;
-    if (lnprob_diff > max_diff) {
-      if (curr_homr <= 0) {
+    hets = rare_ct - homr * 2;
+    homc = homr + c_minus_r;
+    const dd_real lnprobv_ddr =
+      ddr_sub(ddr_muld(_ddr_log2, hets),
+              ddr_add3_lfacts(homr, hets, homc));
+    const double lnprobv_diff = ddr_sub(lnprobv_ddr, starting_lnprobv_ddr).x[0];
+    if (lnprobv_diff >= k2m60) {
+      if (homr <= 0) {
         return 1;
       }
-      const double ll_deriv = log(4 * curr_homr * curr_homc / ((curr_hets + 2) * (curr_hets + 1)));
-      curr_homr += S_CAST(int64_t, (1 - kSmallEpsilon) * lnprob_diff / ll_deriv) - 1;
-      if (curr_homr < 0) {
-        curr_homr = 0;
+      const double lnprobv_deriv = log(4 * homr * homc / ((hets + 2) * (hets + 1)));
+      homr -= ceil(-lnprobv_diff / lnprobv_deriv);
+      if (homr < 0) {
+        homr = 0;
       }
-    } else if (lnprob_diff > -62 * kLn2) {
-      lastp = exp(lnprob_diff);
+    } else if (lnprobv_diff > -62 * kLn2) {
+      lik = exp(lnprobv_diff);
       break;
     } else {
-      const double ll_deriv = log(4 * (curr_homr + 1) * (curr_homc + 1) / (curr_hets * (curr_hets - 1)));
-      curr_homr += S_CAST(int64_t, lnprob_diff / ll_deriv);
-      if (curr_homr > max_homr) {
-        curr_homr = max_homr;
-      }
+      const double lnprobv_deriv = log(4 * (homr + 1) * (homc + 1) / (hets * (hets - 1)));
+      homr += S_CAST(int64_t, lnprobv_diff / lnprobv_deriv);
+      assert(homr <= max_homr);
     }
   }
-  double lastp_tail = lastp;
-  if (lastp < 1 - k2m34) {
-    double curr_homr_center = curr_homr;
-    double curr_homc_center = curr_homc;
-    double curr_hets_center = curr_hets;
-    while (1) {
-      tailp += lastp;
-      if (tailp >= tail_thresh) {
+  double one_minus_scaled_eps = 1 - 3 * k2m52;
+  const double tailenter_lik = lik;
+  const double tailenter_homr = homr;
+  const double tailenter_homc = homc;
+  const double tailenter_hets = hets;
+  while (lik <= one_minus_scaled_eps) {
+    tail_sum += lik;
+    if (tail_sum >= tail_thresh) {
+      return 0;
+    }
+    homr += 1;
+    homc += 1;
+    lik *= hets * (hets - 1) / (4 * homr * homc);
+    hets -= 2;
+    one_minus_scaled_eps -= 2 * k2m52;
+  }
+  if (lik < 2 - one_minus_scaled_eps) {
+    const int32_t hom_decr = obs_homr - S_CAST(int32_t, homr);
+    const intptr_t cmp_result = HweCompare(obs_hets, obs_homr, obs_homc, hom_decr, &starting_lnprobv_ddr, &lik);
+    if (cmp_result <= 0) {
+      if (cmp_result == 0) {
+        tail_sum += 1 - midp * 0.5;
+      } else {
+        tail_sum += lik;
+      }
+      if (tail_sum >= tail_thresh) {
         return 0;
       }
-      curr_homr_center += 1;
-      curr_homc_center += 1;
-      lastp *= curr_hets_center * (curr_hets_center - 1) / (4 * curr_homr_center * curr_homc_center);
-      if (lastp >= 1 - k2m34) {
-        break;
-      }
-      curr_hets_center -= 2;
     }
   }
-  if (lastp <= 1 + k2m34) {
-    tailp += lastp * (1 - midp_d * 0.5);
-    if (tailp >= tail_thresh) {
-      return 0;
-    }
-  }
-  curr_hets += 2;
-  const double cur_ratio = 4 * curr_homr * curr_homc / (curr_hets * (curr_hets - 1));
-  lastp_tail *= cur_ratio;
-  const double remaining_ceil = lastp_tail / (1 - cur_ratio);
-  if (tailp + remaining_ceil < tail_thresh) {
+  lik = tailenter_lik;
+  homr = tailenter_homr;
+  homc = tailenter_homc;
+  hets = tailenter_hets;
+
+  hets += 2;
+  const double cur_ratio = 4 * homr * homc / (hets * (hets - 1));
+  lik *= cur_ratio;
+  const double remaining_ceil = lik / (1 - cur_ratio);
+  if (tail_sum + remaining_ceil < tail_thresh) {
     return 1;
   }
   while (1) {
-    const double preaddp = tailp;
-    tailp += lastp_tail;
-    if (tailp <= preaddp) {
+    const double preadd = tail_sum;
+    tail_sum += lik;
+    if (tail_sum == preadd) {
       return 1;
     }
-    if (tailp >= tail_thresh) {
+    if (tail_sum >= tail_thresh) {
       return 0;
     }
-    curr_homr -= 1;
-    curr_homc -= 1;
-    curr_hets += 2;
-    lastp_tail *= 4 * curr_homr * curr_homc / (curr_hets * (curr_hets - 1));
+    homr -= 1;
+    homc -= 1;
+    hets += 2;
+    lik *= 4 * homr * homc / (hets * (hets - 1));
   }
 }
 
-double FisherExact2x2P(uint32_t m11, uint32_t m12, uint32_t m21, uint32_t m22, uint32_t midp) {
-  // Basic 2x2 Fisher exact test p-value calculation.
-  double tprob = (1 - k2m40) * kExactTestBias;
-  double cur_prob = tprob;
-  double cprob = 0;
+// Switch between log-space and regular likelihood representations at
+// kSwitchThresh.
+// 2^890 leaves enough headroom for at least 4 more multiplies by allele_ct.
+// (Useful to reduce this to e.g. 2^150 when testing correctness, though it
+// isn't currently safe to go all the way down to 1 due to algorithmic
+// assumptions.)
+static const double kSwitchThresh = k2p800 * k2p50 * (1LL << 40);
+static const double kLnSwitchThresh = 890.0 * kLn2;
+static const double kJumpThresh = 314.0; // chosen to guarantee base_lik < kSwitchThresh in non-jumping case
+// static const double kSwitchThresh = k2p100 * k2p50;
+// static const double kLnSwitchThresh = 150.0 * kLn2;
+
+void HweLnFirstRow(int32_t obs_fhets, int32_t obs_fhom1, int32_t obs_fhom2, double* tail_sum_ptr, dd_real* starting_lnprobv_ddr_ptr, int32_t* tie_ct_ptr, double* orig_base_likl_ptr, double* orig_base_lnlikl_ptr, double* orig_base_epsl_ptr, double* orig_base_likr_ptr, double* orig_base_lnlikr_ptr, double* orig_base_epsr_ptr, double* orig_saved_lhets_ptr, double* orig_saved_lhom1_ptr, double* orig_saved_lhom2_ptr, double* orig_saved_rhets_ptr, double* orig_saved_rhom1_ptr, double* orig_saved_rhom2_ptr) {
+  // possible todo: have this and HweLnP() call a shared function
+  const int32_t female_ct = obs_fhets + obs_fhom1 + obs_fhom2;
+  const double f1 = S_CAST(double, obs_fhets + 2LL * obs_fhom1);
+  const double f2 = S_CAST(double, obs_fhets + 2LL * obs_fhom2);
+  const double female_allele_ctd = S_CAST(double, female_ct * 2LL);
+  *starting_lnprobv_ddr_ptr =
+    ddr_sub(ddr_muld(_ddr_log2, obs_fhets),
+            ddr_sort_and_add_3_lfacts(obs_fhets, obs_fhom1, obs_fhom2));
+  const double cmodal_fhets = f1 * f2 / female_allele_ctd;
+  double lik = 1;
   int32_t tie_ct = 1;
-  uint32_t uii;
-  double cur11;
-  double cur12;
-  double cur21;
-  double cur22;
-  double preaddp;
-  // Ensure we are left of the distribution center, m11 <= m22, and m12 <= m21.
-  if (m12 > m21) {
-    uii = m12;
-    m12 = m21;
-    m21 = uii;
-  }
-  if (m11 > m22) {
-    uii = m11;
-    m11 = m22;
-    m22 = uii;
-  }
-  if ((S_CAST(uint64_t, m11) * m22) > (S_CAST(uint64_t, m12) * m21)) {
-    uii = m11;
-    m11 = m12;
-    m12 = uii;
-    uii = m21;
-    m21 = m22;
-    m22 = uii;
-  }
-  cur11 = m11;
-  cur12 = m12;
-  cur21 = m21;
-  cur22 = m22;
-  while (cur12 > 0.5) {
-    cur11 += 1;
-    cur22 += 1;
-    cur_prob *= (cur12 * cur21) / (cur11 * cur22);
-    cur12 -= 1;
-    cur21 -= 1;
-    if (cur_prob > DBL_MAX) {
-      return 0;
-    }
-    if (cur_prob < kExactTestBias) {
-      if (cur_prob > (1 - 2 * k2m40) * kExactTestBias) {
-        tie_ct++;
-      }
-      tprob += cur_prob;
-      break;
-    }
-    cprob += cur_prob;
-  }
-  if ((cprob == 0) && (!midp)) {
-    return 1;
-  }
-  while (cur12 > 0.5) {
-    cur11 += 1;
-    cur22 += 1;
-    cur_prob *= (cur12 * cur21) / (cur11 * cur22);
-    cur12 -= 1;
-    cur21 -= 1;
-    preaddp = tprob;
-    tprob += cur_prob;
-    if (tprob <= preaddp) {
-      break;
-    }
-  }
-  if (m11) {
-    cur11 = m11;
-    cur12 = m12;
-    cur21 = m21;
-    cur22 = m22;
-    cur_prob = (1 - k2m40) * kExactTestBias;
-    do {
-      cur12 += 1;
-      cur21 += 1;
-      cur_prob *= (cur11 * cur22) / (cur12 * cur21);
-      cur11 -= 1;
-      cur22 -= 1;
-      preaddp = tprob;
-      tprob += cur_prob;
-      if (tprob <= preaddp) {
-        if (!midp) {
-          return preaddp / (cprob + preaddp);
-        }
-        return (preaddp - ((1 - k2m40) * kExactTestBias * 0.5) * tie_ct) / (cprob + preaddp);
-      }
-    } while (cur11 > 0.5);
-  }
-  if (!midp) {
-    return tprob / (cprob + tprob);
-  }
-  return (tprob - ((1 - k2m40) * kExactTestBias * 0.5) * tie_ct) / (cprob + tprob);
-}
-
-void HweLnFirstRow(double hetab, double homa, double homb, double* tailp_ptr, double* starting_lnprob_ptr, uint32_t* tie_ct_ptr, double* orig_base_lnprobl_ptr, double* orig_base_lnprobr_ptr, double* orig_saved_lhets_ptr, double* orig_saved_lhoma_ptr, double* orig_saved_lhomb_ptr, double* orig_saved_rhets_ptr, double* orig_saved_rhoma_ptr, double* orig_saved_rhomb_ptr) {
-  const double sample_ctd = hetab + homa + homb;
-  const double a_ctd = hetab + 2 * homa;
-  const double b_ctd = hetab + 2 * homb;
-  const double allele_ctd = sample_ctd * 2;
-  const double common_lnprob_component = Lfact(sample_ctd) + Lfact(a_ctd) + Lfact(b_ctd) - Lfact(allele_ctd);
-  const double starting_lnprob_other_component = hetab * kLn2 - Lfact(hetab) - Lfact(homa) - Lfact(homb);
-  const double starting_lnprob = common_lnprob_component + starting_lnprob_other_component;
-  *starting_lnprob_ptr = starting_lnprob;
-  double lastp = 1;
-  uint32_t tie_ct = 1;
-  double tmp_hets = hetab;
-  if (hetab * hetab > 4 * homa * homb) {
-    // Incrementing hetab decreases likelihood from this point on.
-    *orig_base_lnprobr_ptr = 0;
-    *orig_saved_rhets_ptr = hetab;
-    *orig_saved_rhoma_ptr = homa;
-    *orig_saved_rhomb_ptr = homb;
-    if (starting_lnprob > -10 * kLn2) {
-      // Sum center instead of tail.
-      double centerp = 0;
-      double tmp_homa = homa;
-      double tmp_homb = homb;
-      while (tmp_hets > 1) {
-        tmp_homa += 1;
-        tmp_homb += 1;
-        lastp *= (tmp_hets * (tmp_hets - 1)) / (4 * tmp_homa * tmp_homb);
-        tmp_hets -= 2;
-        if (lastp < 1 + kSmallEpsilon) {
-          tie_ct += (lastp > 1 - kSmallEpsilon);
-          break;
-        }
-        centerp += lastp;
-      }
-      *tie_ct_ptr = tie_ct;
-      *orig_saved_lhets_ptr = tmp_hets;
-      *orig_saved_lhoma_ptr = tmp_homa;
-      *orig_saved_lhomb_ptr = tmp_homb;
-      *orig_base_lnprobl_ptr = log(lastp);
-      *tailp_ptr = exp(-starting_lnprob) - centerp;
-      return;
-    }
-    double* orig_saved_lhomr_ptr = orig_saved_lhoma_ptr;
-    double* orig_saved_lhomc_ptr = orig_saved_lhomb_ptr;
-    double rare_ctd = a_ctd;
-    double c_minus_r = (b_ctd - a_ctd) * 0.5;
-    double tmp_homr = homa;
-    double tmp_homc = homb;
+  double hets = obs_fhets;
+  double homr = obs_fhom1;
+  double homc = obs_fhom2;
+  double tail_sum = 1;
+  double female_rare_ctd = f1;
+  double c_minus_r = homc - homr;
+  if (hets > cmodal_fhets) {
+    *orig_base_likr_ptr = 1;
+    *orig_base_epsr_ptr = k2m52;
+    *orig_saved_rhets_ptr = obs_fhets;
+    *orig_saved_rhom1_ptr = obs_fhom1;
+    *orig_saved_rhom2_ptr = obs_fhom2;
+    double* orig_saved_lhomr_ptr = orig_saved_lhom1_ptr;
+    double* orig_saved_lhomc_ptr = orig_saved_lhom2_ptr;
     if (c_minus_r < 0.0) {
-      orig_saved_lhomr_ptr = orig_saved_lhomb_ptr;
-      orig_saved_lhomc_ptr = orig_saved_lhoma_ptr;
-      rare_ctd = b_ctd;
+      orig_saved_lhomr_ptr = orig_saved_lhom2_ptr;
+      orig_saved_lhomc_ptr = orig_saved_lhom1_ptr;
+      female_rare_ctd = f2;
       c_minus_r = -c_minus_r;
-      tmp_homr = homb;
-      tmp_homc = homa;
+      homr = obs_fhom2;
+      homc = obs_fhom1;
     }
-    const double orig_homr = tmp_homr;
-    double tailp = 1;
-    while (tmp_homr > 0) {
-      tmp_hets += 2;
-      lastp *= (4 * tmp_homr * tmp_homc) / (tmp_hets * (tmp_hets - 1));
-      tmp_homr -= 1;
-      tmp_homc -= 1;
-      const double preaddp = tailp;
-      tailp += lastp;
-      if (tailp <= preaddp) {
-        break;
-      }
-    }
-    const double maf = rare_ctd / allele_ctd;
-    const double modal_nhet = rare_ctd * (1 - maf);
-    const double max_homr = S_CAST(double, S_CAST(int32_t, rare_ctd * 0.5));
-    {
-      const double delta = 0.5 * (tmp_hets + hetab) - modal_nhet;
-      // Round and clamp.
-      tmp_homr = 0.5 * (tmp_homr + orig_homr) + delta;
-      tmp_homr = S_CAST(double, S_CAST(int32_t, tmp_homr + 0.5));
-      if (tmp_homr > max_homr) {
-        tmp_homr = max_homr;
-      }
-    }
-    const double max_diff = MAXV(k2m47, fabs(starting_lnprob_other_component) * k2m47);
+    const double obs_fhomr_d = homr;
+    const double het_delta = hets - cmodal_fhets;
     while (1) {
-      tmp_hets = rare_ctd - tmp_homr * 2;
-      tmp_homc = tmp_homr + c_minus_r;
-      const double lnprob_other_component = tmp_hets * kLn2 - Lfact(tmp_hets) - Lfact(tmp_homr) - Lfact(tmp_homc);
-      const double lnprob_diff = lnprob_other_component - starting_lnprob_other_component;
-      if (lnprob_diff > max_diff) {
-        if (tmp_homr >= max_homr) {
-          // All terms on this tail are larger than the starting term.  Exit.
-          assert(tmp_homr == max_homr);
-          *tie_ct_ptr = 1;
-          *orig_saved_lhets_ptr = tmp_hets;
-          *orig_saved_lhomr_ptr = tmp_homr;
-          *orig_saved_lhomc_ptr = tmp_homc;
-          // exp(lnprob_diff) can be too large to fit in a double, so we make
-          // this return value a log-probability.
-          *orig_base_lnprobl_ptr = lnprob_diff;
-          *tailp_ptr = tailp;
-          return;
-        }
-        const double ll_deriv = log(tmp_hets * (tmp_hets - 1) / (4 * (tmp_homr + 1) * (tmp_homc + 1)));
-        // Round absolute value up, to guarantee that we make progress.
-        // (lnprob_diff is positive and ll_deriv is negative.)
-        // This may overshoot.  But the function is guaranteed to terminate
-        // because we never overshoot (and we do always make progress on each
-        // step) once we're on the other side.
-        tmp_homr += 1 - S_CAST(int64_t, (1 - kSmallEpsilon) * lnprob_diff / ll_deriv);
-        if (tmp_homr > max_homr) {
-          tmp_homr = max_homr;
-        }
-      } else if (lnprob_diff > -62 * kLn2) {
-        lastp = exp(lnprob_diff);
+      hets += 2;
+      lik *= (4 * homr * homc) / (hets * (hets - 1));
+      homr -= 1;
+      homc -= 1;
+      const double preadd = tail_sum;
+      tail_sum += lik;
+      if (tail_sum == preadd) {
         break;
-      } else {
-        const double ll_deriv = log((tmp_hets + 2) * (tmp_hets + 1) / (4 * tmp_homr * tmp_homc));
-        // Round down, to guarantee we don't overshoot.
-        // We're guaranteed to make progress, since lnprob_diff >= 62 * log(2)
-        // and sample_ct < 2^31.
-        tmp_homr -= S_CAST(int64_t, lnprob_diff / ll_deriv);
-        if (tmp_homr < 0) {
-          tmp_homr = 0;
-        }
       }
     }
-    // Sum toward center, until lastp >= 1...
-    // ...or we have returned to the starting cell; this might be possible due
-    // to floating-point error.  Unlike HweLnP(), we didn't early-exit when the
-    // starting cell was a mode.
-    double lastp_tail = lastp;
-    {
-      double tmp_homr_center = tmp_homr;
-      double tmp_homc_center = tmp_homc;
-      double tmp_hets_center = tmp_hets;
-      while (tmp_homr_center > orig_homr) {
-        if (lastp >= 1 - k2m34) {
-          if (lastp <= 1 + k2m34) {
-            tailp += lastp;
-            ++tie_ct;
+    if (het_delta < kJumpThresh) {
+      // Jump back to starting table, and iterate inward until we find the
+      // start of the other tail.
+      lik = 1;
+      hets = obs_fhets;
+      homr = obs_fhomr_d;
+      homc = obs_fhomr_d + c_minus_r;
+      double one_plus_scaled_eps = 1 + k2m52;
+      while (hets > 1) {
+        homr += 1;
+        homc += 1;
+        lik *= (hets * (hets - 1)) / (4 * homr * homc);
+        hets -= 2;
+        one_plus_scaled_eps += 2 * k2m52;
+        if (lik < one_plus_scaled_eps) {
+          if (lik <= 2 - one_plus_scaled_eps) {
+            tail_sum += lik;
+            break;
           }
-          break;
+          // Near-tie.  True value of lik can be greater than, equal to, or
+          // less than 1.
+          const int32_t hom_decr = S_CAST(int32_t, obs_fhomr_d - homr);
+          const intptr_t cmp_result = HweCompare(obs_fhets, obs_fhom1, obs_fhom2, hom_decr, starting_lnprobv_ddr_ptr, &lik);
+          one_plus_scaled_eps = 1 + 3 * k2m52;
+          if (cmp_result <= 0) {
+            tail_sum += lik;
+            tie_ct += (cmp_result == 0);
+            break;
+          }
         }
-        tailp += lastp;
-        tmp_hets_center += 2;
-        lastp *= (4 * tmp_homr_center * tmp_homc_center) / (tmp_hets_center * (tmp_hets_center - 1));
-        tmp_homr_center -= 1;
-        tmp_homc_center -= 1;
       }
-      *tie_ct_ptr = tie_ct;
-      *orig_saved_lhets_ptr = tmp_hets_center;
-      *orig_saved_lhomr_ptr = tmp_homr_center;
-      *orig_saved_lhomc_ptr = tmp_homc_center;
-      *orig_base_lnprobl_ptr = log(lastp);
+      *orig_saved_lhets_ptr = hets;
+      *orig_saved_lhomr_ptr = homr;
+      *orig_saved_lhomc_ptr = homc;
+      *orig_base_likl_ptr = lik;
+      *orig_base_epsl_ptr = one_plus_scaled_eps - 1;
+    } else {
+      const double max_homr = S_CAST(int32_t, female_rare_ctd * 0.5);
+      {
+        const double delta = 0.5 * (hets + obs_fhets) - cmodal_fhets;
+        // Round up and clamp.
+        homr = 0.5 * (homr + obs_fhomr_d) + delta;
+        homr = ceil_limit(homr, max_homr);
+      }
+      while (1) {
+        hets = female_rare_ctd - homr * 2;
+        homc = homr + c_minus_r;
+
+        const dd_real lnprobv_ddr =
+          ddr_sub(ddr_muld(_ddr_log2, hets),
+                  ddr_add3_lfacts(homr, hets, homc));
+        const dd_real lnprobv_diff_ddr = ddr_sub(lnprobv_ddr, *starting_lnprobv_ddr_ptr);
+        const double lnprobv_diff = lnprobv_diff_ddr.x[0];
+        if (lnprobv_diff >= k2m60) {
+          if (homr == max_homr) {
+            // All tables on this tail have higher likelihood than the starting
+            // table.  Exit.
+            assert(homr == max_homr);
+            *tie_ct_ptr = 1;
+            *orig_saved_lhets_ptr = hets;
+            *orig_saved_lhomr_ptr = homr;
+            *orig_saved_lhomc_ptr = homc;
+            *tail_sum_ptr = tail_sum;
+            if (lnprobv_diff < kLnSwitchThresh) {
+              *orig_base_likl_ptr = ddr_exp(lnprobv_diff_ddr).x[0];
+              *orig_base_epsl_ptr = 2 * k2m52;
+            } else {
+              *orig_base_likl_ptr = 0;
+              *orig_base_lnlikl_ptr = lnprobv_diff;
+              *orig_base_epsl_ptr = (1 + ceil(lnprobv_diff)) * k2m52;
+            }
+            return;
+          }
+          const double lnprobv_deriv = log(hets * (hets - 1) / (4 * (homr + 1) * (homc + 1)));
+          // Round absolute value up, to guarantee that we make progress.
+          // (lnprobv_diff is positive and lnprobv_deriv is negative.)
+          // This may overshoot.  But the function is guaranteed to terminate
+          // because we never overshoot (and we do always make progress on each
+          // step) once we're on the other side.
+          homr += ceil(-lnprobv_diff / lnprobv_deriv);
+          if (homr > max_homr) {
+            homr = max_homr;
+          }
+        } else if (lnprobv_diff > -62 * kLn2) {
+          lik = exp(lnprobv_diff);
+          break;
+        } else {
+          const double lnprobv_deriv = log((hets + 2) * (hets + 1) / (4 * homr * homc));
+          // Round down, to guarantee we don't overshoot.
+          // We're guaranteed to make progress, since lnprobv_diff <=
+          // -62 * log(2) and female_ct < 2^31.
+          homr -= S_CAST(int64_t, lnprobv_diff / lnprobv_deriv);
+          assert(homr >= 0);
+        }
+      }
+      // Sum toward center, until lik >= 1.  (No more risk of double-counting
+      // the starting table, since we separated out the started-near-mode
+      // case.)
+      double one_minus_scaled_eps = 1 - 3 * k2m52;
+      const double tailenter_lik = lik;
+      const double tailenter_homr = homr;
+      const double tailenter_homc = homc;
+      const double tailenter_hets = hets;
+      while (lik <= one_minus_scaled_eps) {
+        tail_sum += lik;
+        hets += 2;
+        lik *= (4 * homr * homc) / (hets * (hets - 1));
+        homr -= 1;
+        homc -= 1;
+        one_minus_scaled_eps -= 2 * k2m52;
+      }
+      if (lik < 2 - one_minus_scaled_eps) {
+        const int32_t hom_decr = S_CAST(int32_t, obs_fhomr_d - homr);
+        const intptr_t cmp_result = HweCompare(obs_fhets, obs_fhom1, obs_fhom2, hom_decr, starting_lnprobv_ddr_ptr, &lik);
+        one_minus_scaled_eps = 1 - 3 * k2m52;
+        if (cmp_result <= 0) {
+          tail_sum += lik;
+          tie_ct += (cmp_result == 0);
+        }
+      }
+      *orig_saved_lhets_ptr = hets;
+      *orig_saved_lhomr_ptr = homr;
+      *orig_saved_lhomc_ptr = homc;
+      *orig_base_likl_ptr = lik;
+      *orig_base_epsl_ptr = 1 - one_minus_scaled_eps;
+      lik = tailenter_lik;
+      homr = tailenter_homr;
+      homc = tailenter_homc;
+      hets = tailenter_hets;
     }
+    *tie_ct_ptr = tie_ct;
     // Sum away from center, until sums stop changing.
     while (1) {
-      tmp_homr += 1;
-      tmp_homc += 1;
-      lastp_tail *= (tmp_hets * (tmp_hets - 1)) / (4 * tmp_homr * tmp_homc);
-      const double preaddp = tailp;
-      tailp += lastp_tail;
-      if (tailp <= preaddp) {
+      homr += 1;
+      homc += 1;
+      lik *= (hets * (hets - 1)) / (4 * homr * homc);
+      const double preadd = tail_sum;
+      tail_sum += lik;
+      if (tail_sum == preadd) {
         break;
       }
-      tmp_hets -= 2;
+      hets -= 2;
     }
-    *tailp_ptr = tailp;
+    *tail_sum_ptr = tail_sum;
     return;
   }
-  // Decrementing hetab decreases likelihood from this point on.
-  *orig_base_lnprobl_ptr = 0;
-  *orig_saved_lhets_ptr = hetab;
-  *orig_saved_lhoma_ptr = homa;
-  *orig_saved_lhomb_ptr = homb;
-  if (starting_lnprob > -10 * kLn2) {
-    const double tmp_hets_stop = MINV(a_ctd, b_ctd) - 1.5;
-    double centerp = 0;
-    double tmp_homa = homa;
-    double tmp_homb = homb;
-    while (tmp_hets < tmp_hets_stop) {
-      tmp_hets += 2;
-      lastp *= 4 * tmp_homa * tmp_homb / (tmp_hets * (tmp_hets - 1));
-      tmp_homa -= 1;
-      tmp_homb -= 1;
-      if (lastp < 1 + kSmallEpsilon) {
-        // TODO: fix this in a5.11, wrong parentheses in a5.10
-        tie_ct += (lastp > 1 - kSmallEpsilon);
-        break;
-      }
-      centerp += lastp;
-    }
-    *tie_ct_ptr = tie_ct;
-    *orig_saved_rhets_ptr = tmp_hets;
-    *orig_saved_rhoma_ptr = tmp_homa;
-    *orig_saved_rhomb_ptr = tmp_homb;
-    *orig_base_lnprobr_ptr = log(lastp);
-    *tailp_ptr = exp(-starting_lnprob) - centerp;
-    return;
-  }
-  double* orig_saved_rhomr_ptr = orig_saved_rhoma_ptr;
-  double* orig_saved_rhomc_ptr = orig_saved_rhomb_ptr;
-  double rare_ctd = a_ctd;
-  double c_minus_r = (b_ctd - a_ctd) * 0.5;
-  double tmp_homr = homa;
-  double tmp_homc = homb;
+  *orig_base_likl_ptr = 1;
+  *orig_base_epsl_ptr = k2m52;
+  *orig_saved_lhets_ptr = obs_fhets;
+  *orig_saved_lhom1_ptr = obs_fhom1;
+  *orig_saved_lhom2_ptr = obs_fhom2;
+  double* orig_saved_rhomr_ptr = orig_saved_rhom1_ptr;
+  double* orig_saved_rhomc_ptr = orig_saved_rhom2_ptr;
   if (c_minus_r < 0.0) {
-    orig_saved_rhomr_ptr = orig_saved_rhomb_ptr;
-    orig_saved_rhomc_ptr = orig_saved_rhoma_ptr;
-    rare_ctd = b_ctd;
+    orig_saved_rhomr_ptr = orig_saved_rhom2_ptr;
+    orig_saved_rhomc_ptr = orig_saved_rhom1_ptr;
+    female_rare_ctd = f2;
     c_minus_r = -c_minus_r;
-    tmp_homr = homb;
-    tmp_homc = homa;
+    homr = obs_fhom2;
+    homc = obs_fhom1;
   }
-  const double orig_homr = tmp_homr;
-  double tailp = 1;
-  while (tmp_hets > 1) {
-    tmp_homr += 1;
-    tmp_homc += 1;
-    lastp *= tmp_hets * (tmp_hets - 1) / (4 * tmp_homr * tmp_homc);
-    tmp_hets -= 2;
-    const double preaddp = tailp;
-    tailp += lastp;
-    if (tailp <= preaddp) {
-      break;
-    }
-  }
-  // Jump to other tail.
-  const double maf = rare_ctd / allele_ctd;
-  const double modal_nhet = rare_ctd * (1 - maf);
-  {
-    const double delta = modal_nhet - 0.5 * (tmp_hets + hetab);
-    tmp_homr = 0.5 * (tmp_homr + orig_homr) - delta;
-    // Round and clamp.
-    tmp_homr = S_CAST(double, S_CAST(int32_t, tmp_homr + 0.5));
-    if (tmp_homr < 0) {
-      tmp_homr = 0;
-    }
-  }
-  const double max_diff = MAXV(k2m47, fabs(starting_lnprob_other_component) * k2m47);
-  const double max_homr = S_CAST(double, S_CAST(int32_t, rare_ctd * 0.5));
+  const double obs_fhomr_d = homr;
+  const double het_delta = cmodal_fhets - hets;
   while (1) {
-    tmp_hets = rare_ctd - tmp_homr * 2;
-    tmp_homc = tmp_homr + c_minus_r;
-    const double lnprob_other_component = tmp_hets * kLn2 - Lfact(tmp_hets) - Lfact(tmp_homr) - Lfact(tmp_homc);
-    const double lnprob_diff = lnprob_other_component - starting_lnprob_other_component;
-    if (lnprob_diff > max_diff) {
-      if (tmp_homr <= 0) {
-        // All terms on this tail are larger than the starting term.  Exit.
-        assert(tmp_homr == 0.0);
-        *tie_ct_ptr = 1;
-        *orig_saved_rhets_ptr = tmp_hets;
-        *orig_saved_rhomr_ptr = tmp_homr;
-        *orig_saved_rhomc_ptr = tmp_homc;
-        *orig_base_lnprobr_ptr = lnprob_diff;
-        *tailp_ptr = tailp;
-        return;
-      }
-      const double ll_deriv = log(4 * tmp_homr * tmp_homc / ((tmp_hets + 2) * (tmp_hets + 1)));
-      tmp_homr += S_CAST(int64_t, (1 - kSmallEpsilon) * lnprob_diff / ll_deriv) - 1;
-      if (tmp_homr < 0) {
-        tmp_homr = 0;
-      }
-    } else if (lnprob_diff > -62 * kLn2) {
-      lastp = exp(lnprob_diff);
+    homr += 1;
+    homc += 1;
+    lik *= hets * (hets - 1) / (4 * homr * homc);
+    hets -= 2;
+    const double preadd = tail_sum;
+    tail_sum += lik;
+    if (tail_sum == preadd) {
       break;
-    } else {
-      const double ll_deriv = log(4 * (tmp_homr + 1) * (tmp_homc + 1) / (tmp_hets * (tmp_hets - 1)));
-      tmp_homr += S_CAST(int64_t, lnprob_diff / ll_deriv);
-      if (tmp_homr > max_homr) {
-        tmp_homr = max_homr;
-      }
     }
   }
-  // Sum toward center, until lastp >= 1, or we have returned to the starting
-  // cell.
-  double lastp_tail = lastp;
-  {
-    double tmp_homr_center = tmp_homr;
-    double tmp_homc_center = tmp_homc;
-    double tmp_hets_center = tmp_hets;
-    while (tmp_homr_center < orig_homr) {
-      if (lastp >= 1 - k2m34) {
-        if (lastp <= 1 + k2m34) {
-          tailp += lastp;
-          ++tie_ct;
+  if (het_delta < kJumpThresh) {
+    lik = 1;
+    hets = obs_fhets;
+    homr = obs_fhomr_d;
+    homc = obs_fhomr_d + c_minus_r;
+    double one_plus_scaled_eps = 1 + k2m52;
+    while (homr > 0) {
+      hets += 2;
+      lik *= (4 * homr * homc) / (hets * (hets - 1));
+      homr -= 1;
+      homc -= 1;
+      one_plus_scaled_eps += 2 * k2m52;
+      if (lik < one_plus_scaled_eps) {
+        if (lik <= 2 - one_plus_scaled_eps) {
+          tail_sum += lik;
+          break;
         }
-        break;
+        const int32_t hom_decr = S_CAST(int32_t, obs_fhomr_d - homr);
+        const intptr_t cmp_result = HweCompare(obs_fhets, obs_fhom1, obs_fhom2, hom_decr, starting_lnprobv_ddr_ptr, &lik);
+        one_plus_scaled_eps = 1 + 3 * k2m52;
+        if (cmp_result <= 0) {
+          tail_sum += lik;
+          tie_ct += (cmp_result == 0);
+          break;
+        }
       }
-      tailp += lastp;
-      tmp_homr_center += 1;
-      tmp_homc_center += 1;
-      lastp *= tmp_hets_center * (tmp_hets_center - 1) / (4 * tmp_homr_center * tmp_homc_center);
-      tmp_hets_center -= 2;
     }
-    *tie_ct_ptr = tie_ct;
-    *orig_saved_rhets_ptr = tmp_hets_center;
-    *orig_saved_rhomr_ptr = tmp_homr_center;
-    *orig_saved_rhomc_ptr = tmp_homc_center;
-    *orig_base_lnprobr_ptr = log(lastp);
+    *orig_saved_rhets_ptr = hets;
+    *orig_saved_rhomr_ptr = homr;
+    *orig_saved_rhomc_ptr = homc;
+    *orig_base_likr_ptr = lik;
+    *orig_base_epsr_ptr = one_plus_scaled_eps - 1;
+  } else {
+    // Jump to other tail.
+    {
+      const double delta = cmodal_fhets - 0.5 * (hets + obs_fhets);
+      homr = 0.5 * (homr + obs_fhomr_d) - delta;
+      // Round down and clamp.
+      homr = S_CAST(int32_t, homr);
+      if (homr < 0) {
+        homr = 0;
+      }
+    }
+    while (1) {
+      hets = female_rare_ctd - homr * 2;
+      homc = homr + c_minus_r;
+      const dd_real lnprobv_ddr =
+        ddr_sub(ddr_muld(_ddr_log2, hets),
+                ddr_add3_lfacts(homr, hets, homc));
+      const dd_real lnprobv_diff_ddr = ddr_sub(lnprobv_ddr, *starting_lnprobv_ddr_ptr);
+      const double lnprobv_diff = lnprobv_diff_ddr.x[0];
+      if (lnprobv_diff >= k2m53) {
+        if (homr <= 0) {
+          // All tables on this tail have higher likelihood than the starting
+          // table.  Exit.
+          assert(homr == 0.0);
+          *tie_ct_ptr = 1;
+          *orig_saved_rhets_ptr = hets;
+          *orig_saved_rhomr_ptr = homr;
+          *orig_saved_rhomc_ptr = homc;
+          *tail_sum_ptr = tail_sum;
+          if (lnprobv_diff < kLnSwitchThresh) {
+            *orig_base_likr_ptr = ddr_exp(lnprobv_diff_ddr).x[0];
+            *orig_base_epsr_ptr = 2 * k2m52;
+          } else {
+            *orig_base_likr_ptr = 0;
+            *orig_base_lnlikr_ptr = lnprobv_diff;
+            *orig_base_epsr_ptr = (1 + ceil(lnprobv_diff)) * k2m52;
+          }
+          return;
+        }
+        const double lnprobv_deriv = log(4 * homr * homc / ((hets + 2) * (hets + 1)));
+        homr -= ceil(-lnprobv_diff / lnprobv_deriv);
+        if (homr < 0) {
+          homr = 0;
+        }
+      } else if (lnprobv_diff > -62 * kLn2) {
+        lik = exp(lnprobv_diff);
+        break;
+      } else {
+        const double lnprobv_deriv = log(4 * (homr + 1) * (homc + 1) / (hets * (hets - 1)));
+        homr += S_CAST(int64_t, lnprobv_diff / lnprobv_deriv);
+        assert(homr >= 0);
+      }
+    }
+    // Sum toward center, until lik >= 1.
+    double one_minus_scaled_eps = 1 - 3 * k2m52;
+    const double tailenter_lik = lik;
+    const double tailenter_homr = homr;
+    const double tailenter_homc = homc;
+    const double tailenter_hets = hets;
+    while (lik <= one_minus_scaled_eps) {
+      tail_sum += lik;
+      homr += 1;
+      homc += 1;
+      lik *= hets * (hets - 1) / (4 * homr * homc);
+      hets -= 2;
+      one_minus_scaled_eps -= 2 * k2m52;
+    }
+    if (lik < 2 - one_minus_scaled_eps) {
+      const int32_t hom_decr = S_CAST(int32_t, obs_fhomr_d - homr);
+      const intptr_t cmp_result = HweCompare(obs_fhets, obs_fhom1, obs_fhom2, hom_decr, starting_lnprobv_ddr_ptr, &lik);
+      one_minus_scaled_eps = 1 - 3 * k2m52;
+      if (cmp_result <= 0) {
+        tail_sum += lik;
+        tie_ct += (cmp_result == 0);
+      }
+    }
+    *orig_saved_rhets_ptr = hets;
+    *orig_saved_rhomr_ptr = homr;
+    *orig_saved_rhomc_ptr = homc;
+    *orig_base_likr_ptr = lik;
+    *orig_base_epsr_ptr = 1 - one_minus_scaled_eps;
+    lik = tailenter_lik;
+    homr = tailenter_homr;
+    homc = tailenter_homc;
+    hets = tailenter_hets;
   }
+  *tie_ct_ptr = tie_ct;
   // Sum away from center, until sums stop changing.
   while (1) {
-    tmp_hets += 2;
-    lastp_tail *= 4 * tmp_homr * tmp_homc / (tmp_hets * (tmp_hets - 1));
-    const double preaddp = tailp;
-    tailp += lastp_tail;
-    if (tailp <= preaddp) {
+    hets += 2;
+    lik *= 4 * homr * homc / (hets * (hets - 1));
+    const double preadd = tail_sum;
+    tail_sum += lik;
+    if (tail_sum == preadd) {
       break;
     }
-    tmp_homr -= 1;
-    tmp_homc -= 1;
+    homr -= 1;
+    homc -= 1;
   }
-  *tailp_ptr = tailp;
+  *tail_sum_ptr = tail_sum;
   return;
 }
 
-int32_t HweXchrLnPTailsum(uint32_t high_het_side, double* base_lnprobp, double* saved_hetsp, double* saved_hom1p, double* saved_hom2p, uint32_t* tie_ctp, double *totalp) {
-  // similar to fisher23_tailsum()
+// - *cmp_resultp is set to positive value if the (cur_fhom1, cur_fhom2)
+//   contingency table has higher probability than (obs_fhom1, obs_fhom2), 0 if
+//   identical probability, and negative value if lower probability.
+intptr_t HweXchrCompare(uint32_t obs_fhets, uint32_t obs_fhom1, uint32_t obs_fhom2, uint32_t obs_m1, uint32_t obs_m2, uint32_t cur_fhom1, uint32_t cur_fhom2, int32_t m1_decr, dd_real starting_lnprobv_ddr, double* dbl_ptr) {
+  // From the Graffelman-Weir 2016 paper, probability is
+  //
+  //   (m1+f1)! (m2+f2)! (m1+m2)! (fhets+fhom1+fhom2)!    fhets
+  //   ----------------------------------------------- * 2
+  //     (m1+m2+f1+f2)! m1! m2! fhets! fhom1! fhom2!
+  //
+  // where f1 := fhets + 2*fhom1, and f2 := fhets + 2*fhom2.
+  //
+  // Likelihood ratio with all numerator terms (not counting 2^{fhets}) held
+  // constant is then
+  //
+  //   obs_fhets! obs_fhom1! obs_fhom2! obs_m1! obs_m2!    cur_fhets-obs_fhets
+  //   ------------------------------------------------ * 2
+  //   cur_fhets! cur_fhom1! cur_fhom2! cur_m1! cur_m2!
+  uint64_t numer_factorial_args[5];
+  numer_factorial_args[0] = obs_fhets;
+  numer_factorial_args[1] = obs_fhom1;
+  numer_factorial_args[2] = obs_fhom2;
+  numer_factorial_args[3] = obs_m1;
+  numer_factorial_args[4] = obs_m2;
+  const int32_t fhets_incr = obs_fhom1 + obs_fhom2 - cur_fhom1 - cur_fhom2;
+  uint64_t denom_factorial_args[5];
+  denom_factorial_args[0] = obs_fhets + fhets_incr;
+  denom_factorial_args[1] = cur_fhom1;
+  denom_factorial_args[2] = cur_fhom2;
+  denom_factorial_args[3] = obs_m1 - m1_decr;
+  denom_factorial_args[4] = obs_m2 + m1_decr;
+  td_real ln_odds_ratio_tdr = _tdr_log2;
+  td_real starting_lnprobv_tdr = {{starting_lnprobv_ddr.x[0], starting_lnprobv_ddr.x[1], DBL_MAX}};
+  return CompareFactorialProducts(5, tdr_make1(2.0), fhets_incr, obs_fhets, numer_factorial_args, denom_factorial_args, &starting_lnprobv_tdr, &ln_odds_ratio_tdr, dbl_ptr);
+}
+
+// center_status set to 2 if all tables in current row have relative-likelihood
+// <= 1, ties in current row have been counted, and we can prove all tables in
+// subsequent rows in have relative-likelihood < 1.
+// center_status set to 1 if only the first is true.
+void HweXchrLnPLowHetTailsum(dd_real starting_lnprobv_ddr, uint32_t obs_fhets, uint32_t obs_fhom1, uint32_t obs_fhom2, uint32_t obs_m1, uint32_t obs_m2, int32_t m1_decr, double* base_likp, double* base_lnlikp, double* base_epsp, double* saved_fhetsp, double* saved_fhom1p, double* saved_fhom2p, int32_t* tie_ctp, double *totalp, uint32_t* center_statusp) {
+  // similar to plink 1.9 fisher23_tailsum()
   double total = 0;
-  double cur_lnprob = *base_lnprobp;
-  double tmp_hets = *saved_hetsp;
-  double tmp_hom1 = *saved_hom1p;
-  double tmp_hom2 = *saved_hom2p;
-  double tmps_hets;
-  double tmps_hom1;
-  double tmps_hom2;
-  // identify beginning of tail
-  if (high_het_side) {
-    if (cur_lnprob > k2m34) {
-      double prev_numer = tmp_hom1 * tmp_hom2;
-      // Tried conditionally moving out of log-space, but wasn't able to make
-      // that faster.
-      while (prev_numer > 0.5) {
-        tmp_hets += 2;
-        cur_lnprob += log((4 * prev_numer) / (tmp_hets * (tmp_hets - 1)));
-        tmp_hom1 -= 1;
-        tmp_hom2 -= 1;
-        if (cur_lnprob <= k2m34) {
+  double lik = *base_likp;
+  double cur_eps = *base_epsp;
+  double hets = *saved_fhetsp;
+  double hom1 = *saved_fhom1p;
+  double hom2 = *saved_fhom2p;
+  double tailenter_hets;
+  double tailenter_hom1;
+  double tailenter_hom2;
+  *center_statusp = 0;
+  if (lik == 0.0) {
+    double last_lnp = *base_lnlikp;
+    if (last_lnp >= kLnSwitchThresh) {
+      while (1) {
+        if (hets <= 1) {
+          *base_lnlikp = last_lnp;
+          *base_epsp = cur_eps;
+          *saved_fhetsp = hets;
+          *saved_fhom1p = hom1;
+          *saved_fhom2p = hom2;
+          return;
+        }
+        hom1 += 1;
+        hom2 += 1;
+        const double lnlik_incr = log((hets * (hets - 1)) / (4 * hom1 * hom2));
+        last_lnp += lnlik_incr;
+        hets -= 2;
+        cur_eps += 3 * k2m52;
+        if (lnlik_incr <= -2) {
+          cur_eps += (trunc(-lnlik_incr) - 1) * k2m52;
+        }
+      }
+    }
+    lik = exp(last_lnp);
+  }
+  if (lik >= 1 + cur_eps) {
+    while (1) {
+      if (hets <= 1) {
+        *saved_fhetsp = hets;
+        *saved_fhom1p = hom1;
+        *saved_fhom2p = hom2;
+        if (lik < kSwitchThresh) {
+          *base_likp = lik;
+          *base_epsp = cur_eps;
+        } else {
+          *base_likp = 0;
+          const double last_lnp = log(lik);
+          *base_lnlikp = last_lnp;
+          *base_epsp = cur_eps + ceil(last_lnp) * k2m52;
+        }
+        return;
+      }
+      hom1 += 1;
+      hom2 += 1;
+      lik *= (hets * (hets - 1)) / (4 * hom1 * hom2);
+      hets -= 2;
+      cur_eps += 2 * k2m52;
+      if (lik < 1 + cur_eps) {
+        if (lik <= 1 - cur_eps) {
           break;
         }
-        prev_numer = tmp_hom1 * tmp_hom2;
-      }
-      *base_lnprobp = cur_lnprob;
-      tmps_hets = tmp_hets;
-      tmps_hom1 = tmp_hom1;
-      tmps_hom2 = tmp_hom2;
-    } else {
-      tmps_hets = tmp_hets;
-      tmps_hom1 = tmp_hom1;
-      tmps_hom2 = tmp_hom2;
-      while (1) {
-        const double prev_lnprob = cur_lnprob;
-        tmp_hom1 += 1;
-        tmp_hom2 += 1;
-        cur_lnprob += log((tmp_hets * (tmp_hets - 1)) / (4 * tmp_hom1 * tmp_hom2));
-        if (cur_lnprob < prev_lnprob) {
-          // this should never happen, but better to play it safe re: rounding
-          // error
-          return 1;
+        const intptr_t cmp_result = HweXchrCompare(obs_fhets, obs_fhom1, obs_fhom2, obs_m1, obs_m2, S_CAST(int32_t, hom1), S_CAST(int32_t, hom2), m1_decr, starting_lnprobv_ddr, &lik);
+        cur_eps = 3 * k2m52;
+        if (cmp_result <= 0) {
+          *tie_ctp += (cmp_result == 0);
+          break;
         }
-        tmp_hets -= 2;
-        if (cur_lnprob >= -k2m34) {
-          if (cur_lnprob > k2m34) {
-            break;
-          }
-          *tie_ctp += 1;
-        }
-        total += exp(cur_lnprob);
       }
-      const double prev_lnprob = cur_lnprob;
-      cur_lnprob = *base_lnprobp;
-      *base_lnprobp = prev_lnprob;
     }
+    *base_likp = lik;
+    total = lik;
+    tailenter_hets = hets;
+    tailenter_hom1 = hom1;
+    tailenter_hom2 = hom2;
   } else {
-    if (cur_lnprob > k2m34) {
-      while (tmp_hets > 1.5) {
-        tmp_hom1 += 1;
-        tmp_hom2 += 1;
-        cur_lnprob += log((tmp_hets * (tmp_hets - 1)) / (4 * tmp_hom1 * tmp_hom2));
-        tmp_hets -= 2;
-        if (cur_lnprob <= k2m34) {
+    tailenter_hets = hets;
+    tailenter_hom1 = hom1;
+    tailenter_hom2 = hom2;
+    cur_eps += 2 * k2m52;
+    const double tailenter_lik = lik;
+    uint32_t tie_ct_incr = 0;
+    while (1) {
+      if (lik > 1 - cur_eps) {
+        if (lik >= 1 + cur_eps) {
+          break;
+        }
+        const intptr_t cmp_result = HweXchrCompare(obs_fhets, obs_fhom1, obs_fhom2, obs_m1, obs_m2, S_CAST(int32_t, hom1), S_CAST(int32_t, hom2), m1_decr, starting_lnprobv_ddr, &lik);
+        cur_eps = 3 * k2m52;
+        if (cmp_result > 0) {
+          break;
+        }
+        tie_ct_incr += (cmp_result == 0);
+      }
+      total += lik;
+      hets += 2;
+      double lik_mult = (4 * hom1 * hom2) / (hets * (hets - 1));
+      if (lik_mult <= 1 + 2 * k2m52) {
+        // If lik_mult <= 1, we know we're already at a mode for this row, and
+        // thus there are no tables in this row with relative-likelihood > 1.
+        //
+        // There are a few huge cases where 53-bit accuracy isn't enough to
+        // distinguish == 1 from > 1; fortunately the function contract
+        // ensures int64 is still good enough.
+        const int64_t hom1_i = S_CAST(int32_t, hom1);
+        const int64_t hom2_i = S_CAST(int32_t, hom2);
+        const int64_t hets_i = S_CAST(int32_t, hets);
+        const int64_t lik_mult_numer = 4 * hom1_i * hom2_i;
+        const int64_t lik_mult_denom = hets_i * (hets_i - 1);
+        if (lik_mult_numer <= lik_mult_denom) {
+          // Step back to guarantee we stay in range (otherwise hom1 or hom2
+          // could become negative).
+          hets -= 2;
+
+          // bugfix (25 Apr 2026): When male_ct is more than the ~square of
+          // female_ct, the maximum likelihood in row k+1 is no longer
+          // guaranteed to be between that of row k and row (k+2).
+          // Example: fhets=63, fhom1=27, fhom2=36, m1=8000, m2=9000.
+          // - If (from the starting table on row m2=9000) you move to the
+          //   fhets+=1, fhom2-=1 adjacent table on row m2=9001, the likelihood
+          //   is multiplied by
+          //     2 * old_m1 * old_fhom2 / (new_m2 * new_fhets)
+          //   = 2 * 8000 * 36 / (9001 * 64) < 1
+          // - If you move to the fhets-=1, fhom1+=1 adjacent table,
+          //     old_m1 * old_fhets / (2 * new_m2 * new_fhom1)
+          //     8000 * 63 / (2 * 9001 * 28) < 1
+          // - But if you jump two rows to the fhom1+=1, fhom2-=1 table,
+          //     old_m1 * (old_m1-1) * old_fhom2 / ((new_m2-1) * new_m2 * new_fhom1)
+          //     8000 * 7999 * 36 / (9001 * 9002 * 28) > 1
+          // What's happening here?  If the fhom1 continuous-mode is very close
+          // to an integer on one row and far from the nearest integer on the
+          // next, it's possible for the likelihood at the continuous-mode to
+          // increase from the first row to the second while the integer-mode
+          // likelihood decreases.
+          //
+          // However, if the following additional conditions are true, we can
+          // establish center_status=2:
+          // 1. If m1_decreasing is false, for each table (fhets, fhom1,
+          //    fhom2, m1, m2) in the current or next row, consider the table
+          //      (fhets, fhom1-1, fhom2+1, m1+2, m2-2).
+          //    That table's likelihood divided by the current table's
+          //    likelihood is
+          //      m2 * (m2-1) * fhom1 / ((m1+1) * (m1+2) * (fhom2+1))
+          //    and if all these ratios <= 1, we know all further-out ratios
+          //    are even smaller.
+          //    If m1_decreasing true, swap allele 1 and 2 in the expression
+          //    above.
+          // 2. The next row's mode has relative-likelihood < 1.
+          // Alternatively, if the total row relative-likelihood < 1, we can
+          // also prove it; the caller is expected to check for this.
+          //
+          // Both of these conditions are loose.  I'd rather use the
+          // observation that the continuous-mode cannot change by more than
+          // one fhet per row: so we can compute an upper-bound for the
+          // current-row continuous-mode likelihood based on the
+          // adjacent-table likelihoods, and then look at gamma-function
+          // derivatives.  If digamma(x+1) was equal to log(x+0.5),
+          //   m2 * ((fhets/2) + 0.25) <= (m1+1) * (fhom2 + 0.5) and
+          //   m2 * (fhom1 + 0.5) <= (m1+1) * ((fhets/2) + 0.25)
+          // (along with current continuous-mode relative-likelihood <= 1)
+          // would be enough to establish what we need for m1_decreasing false.
+          // But that's just an approximation; I haven't yet worked out a
+          // provably-correct approach of this type so I will stick to the two
+          // loose exit conditions for now.
+          const double cur_m1 = u31tod(obs_m1 - m1_decr);
+          const double cur_m2 = u31tod(obs_m2 + m1_decr);
+          uint32_t potential_exit = 0;
+          // hets in between the two tables we just evaluated is guaranteed to
+          // be in-range on the next row.
+          double next_hets = hets + 1;
+          double next_eps = cur_eps + 2 * k2m52;
+          double next_hom1;
+          double next_hom2;
+          double next_m1;
+          double next_m2;
+          double next_lik;
+          // (1) Check extremal likelihood ratios between current-row and
+          // row+2, and between row+1 and row+3.
+          if (m1_decr < 0) {
+            // m1_decreasing is false.
+            next_m1 = cur_m1 + 1;
+            next_m2 = cur_m2 - 1;
+            next_hom1 = hom1 - 1;
+            next_hom2 = hom2;
+            next_lik = lik * 2 * cur_m2 * hom1 / (next_m1 * next_hets);
+            if (next_lik < 1 - next_eps) {
+              // If hom1 > hom2, fhom1/(fhom2+1) is maximized with fhom2=0;
+              // otherwise, the limiting case is fhets<2.
+              double numer = cur_m2 * (cur_m2 - 1);
+              double denom = (cur_m1 + 1) * (cur_m1 + 2);
+              if (hom1 > hom2) {
+                numer *= hom1 - hom2;
+              } else {
+                const double hom_incr = trunc(0.5 * hets);
+                numer *= hom1 + hom_incr;
+                denom *= hom2 + hom_incr;
+              }
+              if (numer <= denom * (1 - 3 * k2m52)) {
+                numer = next_m2 * (next_m2 - 1);
+                denom = (next_m1 + 1) * (next_m1 + 2);
+                if (next_hom1 > next_hom2) {
+                  numer *= next_hom1 - hom2 - 1;
+                } else {
+                  const double hom_incr = trunc(0.5 * next_hets);
+                  numer *= next_hom1 + hom_incr;
+                  denom *= next_hom2 + hom_incr;
+                }
+                potential_exit = (numer <= denom * (1 - 3 * k2m52));
+              }
+            }
+          } else {
+            next_m1 = cur_m1 - 1;
+            next_m2 = cur_m2 + 1;
+            next_hom1 = hom1;
+            next_hom2 = hom2 - 1;
+            next_lik = lik * 2 * cur_m1 * hom2 / (next_m2 * next_hets);
+            if (next_lik < 1 - next_eps) {
+              double numer = cur_m1 * (cur_m1 - 1);
+              double denom = (cur_m2 + 1) * (cur_m2 + 2);
+              if (hom2 > hom1) {
+                numer *= hom2 - hom1;
+              } else {
+                const double hom_incr = trunc(0.5 * hets);
+                numer *= hom2 + hom_incr;
+                denom *= hom1 + hom_incr;
+              }
+              if (numer <= denom * (1 - 3 * k2m52)) {
+                numer = next_m1 * (next_m1 - 1);
+                denom = (next_m2 + 1) * (next_m2 + 2);
+                if (next_hom2 > next_hom1) {
+                  numer *= next_hom2 - next_hom1;
+                } else {
+                  const double hom_incr = trunc(0.5 * next_hets);
+                  numer *= next_hom2 + hom_incr;
+                  denom *= next_hom1 + hom_incr;
+                }
+                potential_exit = (numer <= denom * (1 - 3 * k2m52));
+              }
+            }
+          }
+          if (potential_exit) {
+            // (2) Now check next row's mode.
+            const double next_a1_ctd = 2 * next_hom1 + next_hets;
+            const double next_a2_ctd = 2 * next_hom2 + next_hets;
+            const double next_cmodal_nhet = next_a1_ctd * next_a2_ctd / (next_a1_ctd + next_a2_ctd);
+            if (next_hets > next_cmodal_nhet) {
+              // Only need to inspect lower het counts.
+              while (1) {
+                next_hom1 += 1;
+                next_hom2 += 1;
+                lik_mult = next_hets * (next_hets - 1) / (4 * next_hom1 * next_hom2);
+                if (lik_mult < 1) {
+                  break;
+                }
+                next_hets -= 2;
+                next_lik *= lik_mult;
+                next_eps += 2 * k2m52;
+              }
+            } else {
+              // Only need to inspect higher het counts.
+              while (1) {
+                next_hets += 2;
+                lik_mult = 4 * next_hom1 * next_hom2 / (next_hets * (next_hets - 1));
+                if (lik_mult < 1) {
+                  break;
+                }
+                next_hom1 += 1;
+                next_hom2 += 1;
+                next_lik *= lik_mult;
+                next_eps += 2 * k2m52;
+              }
+            }
+            if (next_lik < 1 - next_eps) {
+              *center_statusp = 2;
+              if (tie_ct_incr) {
+                // previous table must have relative-likelihood exactly 1.
+                // bugfix (25 Apr 2026): since we won't call this function
+                // again for the high-het tail, we must check for its
+                // potential tie here.
+                *tie_ctp += tie_ct_incr + (lik_mult_numer == lik_mult_denom);
+              }
+              return;
+            }
+          }
+          *center_statusp = 1;
           break;
         }
       }
-      *base_lnprobp = cur_lnprob;
-      tmps_hets = tmp_hets;
-      tmps_hom1 = tmp_hom1;
-      tmps_hom2 = tmp_hom2;
-    } else {
-      tmps_hets = tmp_hets;
-      tmps_hom1 = tmp_hom1;
-      tmps_hom2 = tmp_hom2;
-      while (1) {
-        const double prev_lnprob = cur_lnprob;
-        tmp_hets += 2;
-        cur_lnprob += log((4 * tmp_hom1 * tmp_hom2) / (tmp_hets * (tmp_hets - 1)));
-        if (cur_lnprob < prev_lnprob) {
-          return 1;
-        }
-        tmp_hom1 -= 1;
-        tmp_hom2 -= 1;
-        if (cur_lnprob >= -k2m34) {
-          if (cur_lnprob > k2m34) {
-            break;
-          }
-          *tie_ctp += 1;
-        }
-        total += exp(cur_lnprob);
-      }
-      const double prev_lnprob = cur_lnprob;
-      cur_lnprob = *base_lnprobp;
-      *base_lnprobp = prev_lnprob;
+      lik *= lik_mult;
+      hom1 -= 1;
+      hom2 -= 1;
+      cur_eps += 2 * k2m52;
     }
+    *base_likp = lik;
+    *tie_ctp += tie_ct_incr;
+    lik = tailenter_lik;
   }
-  *saved_hetsp = tmp_hets;
-  *saved_hom1p = tmp_hom1;
-  *saved_hom2p = tmp_hom2;
-  if (cur_lnprob >= -k2m34) {
-    if (cur_lnprob > k2m34) {
-      // even most extreme table on this side is too probable
-      *totalp = 0;
-      return 0;
-    }
-    *tie_ctp += 1;
-  }
-  double cur_prob = exp(cur_lnprob);
+  *base_epsp = cur_eps;
+  *saved_fhetsp = hets;
+  *saved_fhom1p = hom1;
+  *saved_fhom2p = hom2;
+  // tailenter_{hets,hom1,tmp2} is now at a table with relative-likelihood <=
+  // 1, and 'total' is the sum of all relative-likelihoods for tables at least
+  // as close to the center.
+
   // sum tail to floating point precision limit
-  if (high_het_side) {
-    while (1) {
-      const double prev_tot = total;
-      total += cur_prob;
-      if (total <= prev_tot) {
-        break;
-      }
-      tmps_hets += 2;
-      cur_prob *= (4 * tmps_hom1 * tmps_hom2) / (tmps_hets * (tmps_hets - 1));
-      tmps_hom1 -= 1;
-      tmps_hom2 -= 1;
-    }
-  } else {
-    while (1) {
-      const double prev_tot = total;
-      total += cur_prob;
-      if (total <= prev_tot) {
-        break;
-      }
-      tmps_hom1 += 1;
-      tmps_hom2 += 1;
-      cur_prob *= (tmps_hets * (tmps_hets - 1)) / (4 * tmps_hom1 * tmps_hom2);
-      tmps_hets -= 2;
+  hets = tailenter_hets;
+  hom1 = tailenter_hom1;
+  hom2 = tailenter_hom2;
+  while (1) {
+    hom1 += 1;
+    hom2 += 1;
+    lik *= (hets * (hets - 1)) / (4 * hom1 * hom2);
+    hets -= 2;
+    const double preadd = total;
+    total += lik;
+    if (total == preadd) {
+      break;
     }
   }
   *totalp = total;
-  return 0;
+  return;
 }
 
-double HweXchrLnP(int32_t female_hets, int32_t female_hom1, int32_t female_hom2, int32_t male1, int32_t male2, uint32_t midp) {
+// It is assumed that HweXchrLnPLowHetTailsum() was called first for the row.
+// In the event that there are no 'center' tables at all, fhets_stop is the
+// first table we don't count.
+void HweXchrLnPHighHetTailsum(double fhets_stop, dd_real starting_lnprobv_ddr, uint32_t obs_fhets, uint32_t obs_fhom1, uint32_t obs_fhom2, uint32_t obs_m1, uint32_t obs_m2, int32_t m1_decr, double* base_likp, double* base_lnlikp, double* base_epsp, double* saved_fhetsp, double* saved_fhom1p, double* saved_fhom2p, int32_t* tie_ctp, double *totalp) {
+  // similar to plink 1.9 fisher23_tailsum()
+  double total = 0;
+  double lik = *base_likp;
+  double cur_eps = *base_epsp;
+  double hets = *saved_fhetsp;
+  double hom1 = *saved_fhom1p;
+  double hom2 = *saved_fhom2p;
+  double tailenter_hets;
+  double tailenter_hom1;
+  double tailenter_hom2;
+  // identify beginning of tail
+  if (lik == 0.0) {
+    double last_lnp = *base_lnlikp;
+    if (last_lnp >= kLnSwitchThresh) {
+      while (1) {
+        const double prev_numer = hom1 * hom2;
+        if (prev_numer == 0) {
+          // lowest-likelihood table on this side is still too probable
+          *base_lnlikp = last_lnp;
+          *base_epsp = cur_eps;
+          *saved_fhetsp = hets;
+          *saved_fhom1p = hom1;
+          *saved_fhom2p = hom2;
+          return;
+        }
+        hets += 2;
+        const double lnlik_incr = log((4 * prev_numer) / (hets * (hets - 1)));
+        last_lnp += lnlik_incr;
+        hom1 -= 1;
+        hom2 -= 1;
+        cur_eps += 3 * k2m52;
+        if (lnlik_incr <= -2) {
+          cur_eps += (trunc(-lnlik_incr) - 1) * k2m52;
+        }
+        // no risk of last_lnp dropping below cur_eps
+      }
+    }
+    lik = exp(last_lnp);
+  }
+  if (lik >= 1 + cur_eps) {
+    while (1) {
+      const double prev_numer = hom1 * hom2;
+      if (prev_numer == 0) {
+        // lowest-likelihood table on this side is still too probable
+        *saved_fhetsp = hets;
+        *saved_fhom1p = hom1;
+        *saved_fhom2p = hom2;
+        if (lik < kSwitchThresh) {
+          *base_likp = lik;
+          *base_epsp = cur_eps;
+        } else {
+          *base_likp = 0;
+          const double last_lnp = log(lik);
+          *base_lnlikp = last_lnp;
+          *base_epsp = cur_eps + ceil(last_lnp) * k2m52;
+        }
+        return;
+      }
+      hets += 2;
+      lik *= (4 * prev_numer) / (hets * (hets - 1));
+      hom1 -= 1;
+      hom2 -= 1;
+      cur_eps += 2 * k2m52;
+      if (lik < 1 + cur_eps) {
+        if (lik <= 1 - cur_eps) {
+          break;
+        }
+        const intptr_t cmp_result = HweXchrCompare(obs_fhets, obs_fhom1, obs_fhom2, obs_m1, obs_m2, S_CAST(int32_t, hom1), S_CAST(int32_t, hom2), m1_decr, starting_lnprobv_ddr, &lik);
+        cur_eps = 3 * k2m52;
+        if (cmp_result <= 0) {
+          *tie_ctp += (cmp_result == 0);
+          break;
+        }
+      }
+    }
+    *base_likp = lik;
+    total = lik;
+    tailenter_hets = hets;
+    tailenter_hom1 = hom1;
+    tailenter_hom2 = hom2;
+  } else {
+    tailenter_hets = hets;
+    tailenter_hom1 = hom1;
+    tailenter_hom2 = hom2;
+    const double tailenter_lik = lik;
+    while (hets > fhets_stop) {
+      if (lik > 1 - cur_eps) {
+        if (lik >= 1 + cur_eps) {
+          break;
+        }
+        const intptr_t cmp_result = HweXchrCompare(obs_fhets, obs_fhom1, obs_fhom2, obs_m1, obs_m2, S_CAST(int32_t, hom1), S_CAST(int32_t, hom2), m1_decr, starting_lnprobv_ddr, &lik);
+        cur_eps = 3 * k2m52;
+        if (cmp_result > 0) {
+          break;
+        }
+        *tie_ctp += (cmp_result == 0);
+      }
+      total += lik;
+      hom1 += 1;
+      hom2 += 1;
+      lik *= (hets * (hets - 1)) / (4 * hom1 * hom2);
+      hets -= 2;
+      cur_eps += 2 * k2m52;
+    }
+    *base_likp = lik;
+    lik = tailenter_lik;
+  }
+  *base_epsp = cur_eps;
+  *saved_fhetsp = hets;
+  *saved_fhom1p = hom1;
+  *saved_fhom2p = hom2;
+  // tailenter_{hets,hom1,tmp2} is now at a table with relative-likelihood <=
+  // 1, and 'total' is the sum of all relative-likelihoods for tables at least
+  // as close to the center.
+
+  // sum tail to floating point precision limit
+  hets = tailenter_hets;
+  hom1 = tailenter_hom1;
+  hom2 = tailenter_hom2;
+  while (1) {
+    hets += 2;
+    lik *= (4 * hom1 * hom2) / (hets * (hets - 1));
+    hom1 -= 1;
+    hom2 -= 1;
+    const double preadd = total;
+    total += lik;
+    if (total == preadd) {
+      break;
+    }
+  }
+  *totalp = total;
+  return;
+}
+
+// This could optionally take a longer precomputed ddr_lfact table as an
+// additional pair of parameters, but it isn't a big deal: large problem
+// instances are dominated by ordinary arithmetic operations rather than
+// ddr_lfact calls, and the fixed overhead amounts to less than a second of
+// wall-clock time when I test millions of chrX variants on an ordinary Mac.
+double HweXchrLnP(int32_t obs_fhets, int32_t obs_fhom1, int32_t obs_fhom2, int32_t obs_m1, int32_t obs_m2, uint32_t midp) {
   // See Graffelman J, Weir BS (2016) Testing for Hardy-Weinberg equilibrium at
   // biallelic genetic markers on the X chromosome.
-  // Evaluation strategy is similar to fisher23().
-  if ((!male1) && (!male2)) {
-    return HweLnP(female_hets, female_hom1, female_hom2, midp);
+  // Evaluation strategy is similar to plink 1.9 fisher23().
+  if ((!obs_m1) && (!obs_m2)) {
+    return HweLnP(obs_fhets, obs_fhom1, obs_fhom2, midp);
   }
-  // 1. Determine relative tail vs. center masses for the male1/male2-unchanged
-  //    slice.
-  double cur_female_hetd = S_CAST(double, female_hets);
-  double cur_female_hom1d = S_CAST(double, female_hom1);
-  double cur_female_hom2d = S_CAST(double, female_hom2);
-  const double male1d = u31tod(male1);
-  const double male2d = u31tod(male2);
-  const double n1 = cur_female_hetd + 2 * cur_female_hom1d + male1d;
-  const double n2 = cur_female_hetd + 2 * cur_female_hom2d + male2d;
-  double tailp;
-  double starting_lnprob;
-  uint32_t tie_ct;
+  // 1. Determine relative tail vs. center masses for the starting row.
+  //    (Within a row, m1/m2 are constant, so the calculation reduces to the
+  //    non-chrX case.  'm' stands for male here.)
+  const double a1_ctd = S_CAST(double, obs_fhets + 2LL * obs_fhom1 + obs_m1);
+  const double a2_ctd = S_CAST(double, obs_fhets + 2LL * obs_fhom2 + obs_m2);
   // "left" = low hets side, "right" = high hets side
-  double orig_base_lnprobl;
-  double orig_base_lnprobr;
+  // orig_base_lnlik{l,r} is valid iff orig_base_lik{l,r} is zero.
+  double orig_base_lnlikl = 0;
+  double orig_base_lnlikr = 0;
+  double orig_base_likl;
+  double orig_base_epsl;
+  double orig_base_likr;
+  double orig_base_epsr;
+  double outer_sum;
+  dd_real starting_lnprobv_ddr;
+  int32_t tie_ct;
   double orig_saved_lhets;
   double orig_saved_lhom1;
   double orig_saved_lhom2;
   double orig_saved_rhets;
   double orig_saved_rhom1;
   double orig_saved_rhom2;
-  HweLnFirstRow(cur_female_hetd, cur_female_hom1d, cur_female_hom2d, &tailp, &starting_lnprob, &tie_ct, &orig_base_lnprobl, &orig_base_lnprobr, &orig_saved_lhets, &orig_saved_lhom1, &orig_saved_lhom2, &orig_saved_rhets, &orig_saved_rhom1, &orig_saved_rhom2);
+  HweLnFirstRow(obs_fhets, obs_fhom1, obs_fhom2, &outer_sum, &starting_lnprobv_ddr, &tie_ct, &orig_base_likl, &orig_base_lnlikl, &orig_base_epsl, &orig_base_likr, &orig_base_lnlikr, &orig_base_epsr, &orig_saved_lhets, &orig_saved_lhom1, &orig_saved_lhom2, &orig_saved_rhets, &orig_saved_rhom1, &orig_saved_rhom2);
 
-  // A "row" holds male1/male2 constant.
-  // tailp, exp(orig_base_lnprobl), and exp(orig_base_lnprobr) are in units of
-  // exp(starting_lnprob) within the starting row.
-  for (uint32_t male1_decreasing = 0; male1_decreasing != 2; ++male1_decreasing) {
-    double cur_male1 = male1d;
-    double cur_male2 = male2d;
-    double ln_row_prob = -starting_lnprob;
-    double cur_lhets = orig_saved_lhets;
-    double cur_lhom1 = orig_saved_lhom1;
-    double cur_lhom2 = orig_saved_lhom2;
-    double cur_rhets = orig_saved_rhets;
-    double cur_rhom1 = orig_saved_rhom1;
-    double cur_rhom2 = orig_saved_rhom2;
-    double base_lnprobl = orig_base_lnprobl;
-    double base_lnprobr = orig_base_lnprobr;
-    uint32_t iter_ct;
-    if (male1_decreasing) {
-      iter_ct = 2 * female_hom2 + female_hets;
-      if (iter_ct > S_CAST(uint32_t, male1)) {
-        iter_ct = male1;
+  // Returned starting_lnprobv_ddr is for a single row, corresponding to
+  // 2^obs_fhets / (obs_fhets! obs_fhom1! obs_fhom2!).
+  // Modify this to include the m1! m2! denominator terms that vary between
+  // rows.
+  starting_lnprobv_ddr = ddr_sub(starting_lnprobv_ddr, ddr_add_lfacts(obs_m1, obs_m2));
+
+  // Other log-factorial expressions we want:
+  //
+  // * lnprobf, so we can add it to starting_lnprobv at the end and convert
+  //   outer_sum (which is a multiple of starting_prob) into the final
+  //   log-[mid]p-value.
+  //
+  //     (m1+f1)! (m2+f2)! (m1+m2)! (fhets+fhom1+fhom2)!
+  //     -----------------------------------------------
+  //                     (m1+m2+f1+f2)!
+  //
+  // * Probability of a table is
+  //
+  //     (m1+f1)! (m2+f2)! (m1+m2)!   (fhets+fhom1+fhom2)!    fhets
+  //     -------------------------- * -------------------- * 2
+  //       (m1+m2+f1+f2)! m1! m2!     fhets! fhom1! fhom2!
+  //
+  //   where the first fraction is constant, and the remainder of the
+  //   is (f1+f2)! / (f1!f2!) times the likelihood for a female-only HWE test.
+  //   Thus, the probability sum over an entire row is
+  //
+  //     (m1+f1)! (m2+f2)! (m1+m2)!   (f1+f2)!
+  //     -------------------------- * --------
+  //       (m1+m2+f1+f2)! m1! m2!     f1! f2!
+  //
+  //   We actually want this row-likelihood in starting_prob units:
+  //
+  //     (m1+f1) (m2+f2)! (m1+m2)! (f1+f2)!    (m1+m2+f1+f2)! / starting_probv
+  //     ---------------------------------- * ---------------------------------
+  //       (m1+m2+f1+f2)! m1! m2! f1! f2!     (m1+f1)! ... (fhets+fhom1+fhom2)!
+  //
+  //                          (f1+f2)!
+  //   = ---------------------------------------------------
+  //     m1! m2! f1! f2! (fhets+fhom1+fhom2)! starting_probv
+  const double female_ctd = obs_fhets + obs_fhom1 + obs_fhom2;
+  const dd_real female_ct_lfact_ddr = ddr_lfact(female_ctd);
+  const dd_real lnprobf_ddr =
+    ddr_sub(ddr_add(ddr_sort_and_add_3_lfacts(a1_ctd, a2_ctd, obs_m1 + obs_m2), female_ct_lfact_ddr),
+            ddr_lfact(a1_ctd + a2_ctd));
+  const dd_real row_relative_lnprobf_ddr =
+    ddr_sub(ddr_lfact(2 * female_ctd),
+            ddr_add(female_ct_lfact_ddr, starting_lnprobv_ddr));
+
+  // outer_sum, orig_base_likl, and orig_base_likr are expressed as multiples
+  // of starting_prob.
+  for (uint32_t m1_decreasing = 0; m1_decreasing != 2; ++m1_decreasing) {
+    double m1 = obs_m1;
+    double m2 = obs_m2;
+    double lhets = orig_saved_lhets;
+    double lhom1 = orig_saved_lhom1;
+    double lhom2 = orig_saved_lhom2;
+    double rhets = orig_saved_rhets;
+    double rhom1 = orig_saved_rhom1;
+    double rhom2 = orig_saved_rhom2;
+    double base_likl = orig_base_likl;
+    double base_lnlikl = orig_base_lnlikl;
+    double base_epsl = orig_base_epsl;
+    double base_likr = orig_base_likr;
+    double base_lnlikr = orig_base_lnlikr;
+    double base_epsr = orig_base_epsr;
+    int32_t m1_decr_last;
+    if (m1_decreasing) {
+      m1_decr_last = obs_m1;
+      const uint32_t uii = 2 * S_CAST(uint32_t, obs_fhom2) + S_CAST(uint32_t, obs_fhets);
+      if (uii < S_CAST(uint32_t, obs_m1)) {
+        m1_decr_last = uii;
       }
     } else {
-      iter_ct = 2 * female_hom1 + female_hets;
-      if (iter_ct > S_CAST(uint32_t, male2)) {
-        iter_ct = male2;
+      m1_decr_last = -obs_m2;
+      const uint32_t uii = 2 * S_CAST(uint32_t, obs_fhom1) + S_CAST(uint32_t, obs_fhets);
+      if (uii < S_CAST(uint32_t, obs_m2)) {
+        m1_decr_last = -S_CAST(int32_t, uii);
       }
     }
-    for (uint32_t iter_idx = 0; iter_idx != iter_ct; ++iter_idx) {
-      if (male1_decreasing) {
-        const double old_male1 = cur_male1;
-        const double old_female2 = n2 - cur_male2;
-        cur_male2 += 1;
-        cur_male1 -= 1;
-        // row likelihood is ((n1 choose male1) * (n2 choose male2)) /
-        //   ((n1 + n2) choose (male1 + male2))
-        ln_row_prob += log((old_male1 * old_female2) / (cur_male2 * (n1 - cur_male1)));
+    for (int32_t m1_decr = 0; m1_decr != m1_decr_last; ) {
+      m1_decr += m1_decreasing * 2 - 1;
+      double lik_mult;
+      if (m1_decreasing) {
+        const double prev_m1 = m1;
+        m2 += 1;
+        m1 -= 1;
         // bugfix (19 Apr 2017): We cannot move to the right of the mode here.
         // Otherwise, if the mode itself is more probable than our initial
         // table, but the table to the immediate right of the mode is not,
         // we'll fail to count the mode.
         // ("right" = high het count, "left" = low het count.)
-        if (cur_lhets != 0.0) {
-          cur_lhom1 += 1;
-          base_lnprobl += log((old_male1 * cur_lhets) / (2 * cur_male2 * cur_lhom1));
-          cur_lhets -= 1;
+        if (lhets != 0.0) {
+          lhom1 += 1;
+          lik_mult = (prev_m1 * lhets) / (2 * m2 * lhom1);
+          lhets -= 1;
         } else {
-          cur_lhets += 1;
-          base_lnprobl += log((2 * old_male1 * cur_lhom2) / (cur_male2 * cur_lhets));
-          cur_lhom2 -= 1;
+          lhets += 1;
+          lik_mult = (2 * prev_m1 * lhom2) / (m2 * lhets);
+          lhom2 -= 1;
         }
       } else {
-        const double old_male2 = cur_male2;
-        const double old_female1 = n1 - cur_male1;
-        cur_male1 += 1;
-        cur_male2 -= 1;
-        ln_row_prob += log((old_male2 * old_female1) / (cur_male1 * (n2 - cur_male2)));
-        if (cur_lhets != 0.0) {
-          cur_lhom2 += 1;
-          base_lnprobl += log((old_male2 * cur_lhets) / (2 * cur_male1 * cur_lhom2));
-          cur_lhets -= 1;
+        const double prev_m2 = m2;
+        m1 += 1;
+        m2 -= 1;
+        if (lhets != 0.0) {
+          lhom2 += 1;
+          lik_mult = (prev_m2 * lhets) / (2 * m1 * lhom2);
+          lhets -= 1;
         } else {
-          cur_lhets += 1;
-          base_lnprobl += log((2 * old_male2 * cur_lhom1) / (cur_male1 * cur_lhets));
-          cur_lhom1 -= 1;
+          lhets += 1;
+          lik_mult = (2 * prev_m2 * lhom1) / (m1 * lhets);
+          lhom1 -= 1;
         }
       }
-      double tail_incr1;
-      if (HweXchrLnPTailsum(0, &base_lnprobl, &cur_lhets, &cur_lhom1, &cur_lhom2, &tie_ct, &tail_incr1)) {
-        // all tables in this row, and all subsequent rows, are less probable
-        // than the initial table.
-        double cur_female1 = n1 - cur_male1;
-        double cur_female2 = n2 - cur_male2;
-        double row_prob = exp(ln_row_prob);
-        if (male1_decreasing) {
+      if (base_likl == 0.0) {
+        const double lnlik_incr = log(lik_mult);
+        base_lnlikl += lnlik_incr;
+        base_epsl += 3 * k2m52;
+        if (fabs(lnlik_incr) >= 2) {
+          base_epsl += (trunc(fabs(lnlik_incr)) - 1) * k2m52;
+        }
+      } else {
+        base_likl *= lik_mult;
+        base_epsl += 2 * k2m52;
+      }
+      double tail_incr = 0.0;
+      uint32_t center_status;
+      HweXchrLnPLowHetTailsum(starting_lnprobv_ddr, obs_fhets, obs_fhom1, obs_fhom2, obs_m1, obs_m2, m1_decr, &base_likl, &base_lnlikl, &base_epsl, &lhets, &lhom1, &lhom2, &tie_ct, &tail_incr, &center_status);
+      if (center_status < 2) {
+        if (m1_decreasing) {
+          const double prev_m1 = m1 + 1;
+          if (rhom2 != 0.0) {
+            rhets += 1;
+            lik_mult = 2 * prev_m1 * rhom2 / (m2 * rhets);
+            rhom2 -= 1;
+          } else {
+            rhom1 += 1;
+            lik_mult = prev_m1 * rhets / (2 * m2 * rhom1);
+            rhets -= 1;
+          }
+        } else {
+          const double prev_m2 = m2 + 1;
+          if (rhom1 != 0.0) {
+            rhets += 1;
+            lik_mult = 2 * prev_m2 * rhom1 / (m1 * rhets);
+            rhom1 -= 1;
+          } else {
+            rhom2 += 1;
+            lik_mult = prev_m2 * rhets / (2 * m1 * rhom2);
+            rhets -= 1;
+          }
+        }
+        if (base_likr == 0.0) {
+          const double lnlik_incr = log(lik_mult);
+          base_lnlikr += lnlik_incr;
+          base_epsr += 3 * k2m52;
+          if (fabs(lnlik_incr) >= 2) {
+            base_epsr += (trunc(fabs(lnlik_incr)) - 1) * k2m52;
+          }
+        } else {
+          base_likr *= lik_mult;
+          base_epsr += 2 * k2m52;
+        }
+        if (rhets < lhets) {
+          // Make sure we don't double-count any tables when center is empty.
+          // (may be able to prove this condition never triggers?)
+          assert(base_likl != 0.0);
+          base_likr = base_likl;
+          base_epsr = base_epsl;
+          rhets = lhets;
+          rhom1 = lhom1;
+          rhom2 = lhom2;
+        }
+        double tail_incr2 = 0.0;
+        HweXchrLnPHighHetTailsum(lhets, starting_lnprobv_ddr, obs_fhets, obs_fhom1, obs_fhom2, obs_m1, obs_m2, m1_decr, &base_likr, &base_lnlikr, &base_epsr, &rhets, &rhom1, &rhom2, &tie_ct, &tail_incr2);
+        tail_incr += tail_incr2;
+        if ((center_status == 1) && (tail_incr < 1.0)) {
+          center_status = 2;
+        }
+      }
+      if (center_status == 2) {
+        // All tables in subsequent rows have relative-likelihood < 1, all
+        // tables in this row have relative-likelihood <= 1 with ties counted.
+        double f1 = a1_ctd - m1;
+        double f2 = a2_ctd - m2;
+        // On the 1000 Genomes dataset, this approach is more expensive than
+        // incrementally updating ln_row_lik.  However, it should scale better
+        // to larger female_ct.
+        const dd_real row_adj_ddr = ddr_sort_and_add_4_lfacts(m1, f1, m2, f2);
+        double row_lik = exp(ddr_sub(row_relative_lnprobf_ddr, row_adj_ddr).x[0]);
+        if (m1_decreasing) {
           while (1) {
-            const double preaddp = tailp;
-            tailp += row_prob;
-            if (tailp == preaddp) {
+            const double preadd = outer_sum;
+            outer_sum += row_lik;
+            if (outer_sum == preadd) {
               break;
             }
-            cur_male2 += 1;
-            cur_female1 += 1;
-            row_prob *= (cur_male1 * cur_female2) / (cur_male2 * cur_female1);
-            cur_male1 -= 1;
-            cur_female2 -= 1;
+            m2 += 1;
+            f1 += 1;
+            row_lik *= m1 * f2 / (m2 * f1);
+            m1 -= 1;
+            f2 -= 1;
           }
         } else {
           while (1) {
-            const double preaddp = tailp;
-            tailp += row_prob;
-            if (tailp == preaddp) {
+            const double preadd = outer_sum;
+            outer_sum += row_lik;
+            if (outer_sum == preadd) {
               break;
             }
-            cur_male1 += 1;
-            cur_female2 += 1;
-            row_prob *= (cur_male2 * cur_female1) / (cur_male1 * cur_female2);
-            cur_male2 -= 1;
-            cur_female1 -= 1;
+            m1 += 1;
+            f2 += 1;
+            row_lik *= m2 * f1 / (m1 * f2);
+            m2 -= 1;
+            f1 -= 1;
           }
         }
         break;
       }
-      tailp += tail_incr1;
-      if (male1_decreasing) {
-        const double old_male1 = cur_male1 + 1;
-        if (cur_rhom2 != 0.0) {
-          cur_rhets += 1;
-          base_lnprobr += log((2 * old_male1 * cur_rhom2) / (cur_male2 * cur_rhets));
-          cur_rhom2 -= 1;
-        } else {
-          cur_rhom1 += 1;
-          base_lnprobr += log((old_male1 * cur_rhets) / (2 * cur_male2 * cur_rhom1));
-          cur_rhets -= 1;
-        }
-      } else {
-        const double old_male2 = cur_male2 + 1;
-        if (cur_rhom1 != 0.0) {
-          cur_rhets += 1;
-          base_lnprobr += log((2 * old_male2 * cur_rhom1) / (cur_male1 * cur_rhets));
-          cur_rhom1 -= 1;
-        } else {
-          cur_rhom2 += 1;
-          base_lnprobr += log((old_male2 * cur_rhets) / (2 * cur_male1 * cur_rhom2));
-          cur_rhets -= 1;
-        }
-      }
-      double tail_incr2 = 0.0;  // maybe-uninitialized warning
-      HweXchrLnPTailsum(1, &base_lnprobr, &cur_rhets, &cur_rhom1, &cur_rhom2, &tie_ct, &tail_incr2);
-      tailp += tail_incr2;
+      outer_sum += tail_incr;
     }
   }
-  // row likelihood is ((n1 choose male1) * (n2 choose male2)) /
-  //   ((n1 + n2) choose (male1 + male2))
-  // try to start with smaller terms to reduce cancellation hit
-  const double absolute_row_lnprob = -Lfact(male1d) - Lfact(n1 - male1d) + Lfact(n1) - Lfact(male2d) - Lfact(n2 - male2d) + Lfact(n2) + Lfact(male1d + male2d) + Lfact(n1 + n2 - male1d - male2d) - Lfact(n1 + n2);
+  const double starting_lnprob =
+    ddr_add(lnprobf_ddr, starting_lnprobv_ddr).x[0];
   if (midp) {
-    tailp -= S_CAST(double, tie_ct) * 0.5;
+    outer_sum -= tie_ct * 0.5;
   }
-  double result = log(tailp) + absolute_row_lnprob + starting_lnprob;
-  if (result > -kBigEpsilon) {
+  const double result = log(outer_sum) + starting_lnprob;
+  if (result > -k2m35) {
     // true p-value should always be 1 here
+    // (possible todo: check boundary cases with female_ct near 2^31)
     return 0.0;
   }
   return result;

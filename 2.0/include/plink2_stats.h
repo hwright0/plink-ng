@@ -32,15 +32,10 @@ double ChisqToP(double chisq, uint32_t df);
 double ChisqToLnP(double chisq, uint32_t df);
 
 // only handles df=1 and 2 for now, plan to support 4 later
-double PToChisq(double pval, uint32_t df);
+// double PToChisq(double pval, uint32_t df);
 
 // only handles df=1 for now
 double LnPToChisq(double ln_pval);
-
-// Better than the original TstatToP() when the same df comes up many times.
-// (May want a higher-level interface that allocates and incrementally fills a
-// table.)
-double TstatToP2(double tt, double df, double cached_gamma_mult);
 
 // No -9 error return since that's a legitimate p-value logarithm.  Caller is
 // responsible for validating input.
@@ -58,20 +53,27 @@ HEADER_INLINE double ZscoreToLnP(double zz) {
   return ChisqToLnP(zz * zz, 1);
 }
 
-// Assumes xx is a nonnegative integer.
-double Lfact(double xx);
-
 // HweP() has been replaced by HweLnP().  HweThresh() and HweThreshMidp() have
 // been replaced by HweThreshLn().
+double HweLnP(int32_t obs_hets, int32_t obs_hom1, int32_t obs_hom2, int32_t midp);
 
-double HweLnP(int32_t obs_hets, int32_t obs_hom1, int32_t obs_hom2, uint32_t midp);
+// These return 0 if close enough to Hardy-Weinberg equilibrium.
+//
+// We could improve the accuracy promise re: distinguishing pval < pval_thresh
+// from pval >= pval_thresh; this would reduce the risk of --hwe filtering out
+// slightly different variants between plink2 versions.  However, we really
+// only care about float32-level accuracy for p-value mantissas; --hardy (and
+// --glm) only prints out p-values to 6 significant digits, and more digits
+// would be more distracting than valuable.  So slowing down the calculation
+// with dd_reals to drive pval relative error < 2^{-52} makes little sense in
+// the big picture; instead, the best way to manage result instability after
+// the beta 1 release is to just set a high bar for making any more behavior
+// changes.
+uint32_t HweThresh(int32_t obs_hets, int32_t obs_hom1, int32_t obs_hom2, double pval_thresh);
 
-// these return 0 if close enough to Hardy-Weinberg equilibrium
-uint32_t HweThresh(int32_t obs_hets, int32_t obs_hom1, int32_t obs_hom2, double thresh);
+uint32_t HweThreshMidp(int32_t obs_hets, int32_t obs_hom1, int32_t obs_hom2, double pval_thresh);
 
-uint32_t HweThreshMidp(int32_t obs_hets, int32_t obs_hom1, int32_t obs_hom2, double thresh);
-
-uint32_t HweThreshLnMain(int32_t obs_hets, int32_t obs_hom1, int32_t obs_hom2, uint32_t midp, double ln_thresh);
+uint32_t HweThreshLnMain(int32_t obs_hets, int32_t obs_hom1, int32_t obs_hom2, int32_t midp, double ln_thresh);
 
 HEADER_INLINE uint32_t HweThreshLn(int32_t obs_hets, int32_t obs_hom1, int32_t obs_hom2, uint32_t midp, double thresh, double ln_thresh) {
   // kLnNormalMin = -708.3964185...
@@ -85,9 +87,7 @@ HEADER_INLINE uint32_t HweThreshLn(int32_t obs_hets, int32_t obs_hom1, int32_t o
   return HweThreshLnMain(obs_hets, obs_hom1, obs_hom2, midp, ln_thresh);
 }
 
-double FisherExact2x2P(uint32_t m11, uint32_t m12, uint32_t m21, uint32_t m22, uint32_t midp);
-
-double HweXchrLnP(int32_t female_hets, int32_t female_hom1, int32_t female_hom2, int32_t male1, int32_t male2, uint32_t midp);
+double HweXchrLnP(int32_t obs_fhets, int32_t obs_fhom1, int32_t obs_fhom2, int32_t obs_m1, int32_t obs_m2, uint32_t midp);
 
 #ifdef __cplusplus
 }

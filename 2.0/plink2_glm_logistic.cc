@@ -18,12 +18,13 @@
 
 #include <assert.h>
 #include <math.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "include/pgenlib_misc.h"
 #include "include/plink2_bits.h"
+#include "include/plink2_float.h"
 #include "include/plink2_fmath.h"
+#include "include/plink2_simd.h"
 #include "include/plink2_stats.h"
 #include "include/plink2_string.h"
 #include "include/plink2_thread.h"
@@ -59,12 +60,12 @@ BoolErr LinearHypothesisChisqF(const float* coef, const float* constraints_con_m
   const float* inner_iter = inner_buf;
   if (constraint_ct > kDotprodFThresh) {
     for (uint32_t constraint_idx = 0; constraint_idx != constraint_ct; ++constraint_idx) {
-      result += S_CAST(double, DotprodF(inner_iter, outer_buf, constraint_ct) * outer_buf[constraint_idx]);
+      result = prefer_fma(S_CAST(double, DotprodF(inner_iter, outer_buf, constraint_ct)), S_CAST(double, outer_buf[constraint_idx]), result);
       inner_iter = &(inner_iter[constraint_ct]);
     }
   } else {
     for (uint32_t constraint_idx = 0; constraint_idx != constraint_ct; ++constraint_idx) {
-      result += S_CAST(double, DotprodFShort(inner_iter, outer_buf, constraint_ct) * outer_buf[constraint_idx]);
+      result = prefer_fma(S_CAST(double, DotprodFShort(inner_iter, outer_buf, constraint_ct)), S_CAST(double, outer_buf[constraint_idx]), result);
       inner_iter = &(inner_iter[constraint_ct]);
     }
   }
@@ -99,15 +100,15 @@ GlmErr CheckMaxCorrAndVifF(const float* predictors_pmaj, uint32_t predictor_ct, 
     dbl_2d_buf[pred_idx] = row_sum;
   }
   const uint32_t predictor_ct_p1 = predictor_ct + 1;
-  const double sample_ct_recip = 1.0 / u31tod(sample_ct);
+  const double neg_sample_ct_recip = -1.0 / u31tod(sample_ct);
   const double sample_ct_m1_d = u31tod(sample_ct - 1);
   const double sample_ct_m1_recip = 1.0 / sample_ct_m1_d;
   for (uint32_t pred_idx1 = 0; pred_idx1 != predictor_ct; ++pred_idx1) {
     double* sample_cov_row = &(inverse_corr_buf[pred_idx1 * predictor_ct]);
     const float* predictor_dotprod_row = &(predictor_dotprod_buf[pred_idx1 * predictor_ct]);
-    const double pred1_mean_adj = dbl_2d_buf[pred_idx1] * sample_ct_recip;
+    const double neg_pred1_mean_adj = dbl_2d_buf[pred_idx1] * neg_sample_ct_recip;
     for (uint32_t pred_idx2 = 0; pred_idx2 <= pred_idx1; ++pred_idx2) {
-      sample_cov_row[pred_idx2] = (S_CAST(double, predictor_dotprod_row[pred_idx2]) - pred1_mean_adj * dbl_2d_buf[pred_idx2]) * sample_ct_m1_recip;
+      sample_cov_row[pred_idx2] = prefer_fma(neg_pred1_mean_adj, dbl_2d_buf[pred_idx2], S_CAST(double, predictor_dotprod_row[pred_idx2])) * sample_ct_m1_recip;
     }
   }
   // now use dbl_2d_buf to store inverse-sqrts, to get to correlation matrix
@@ -1903,10 +1904,16 @@ THREAD_FUNC_DECL GlmLogisticThreadF(void* raw_arg) {
           double a1_dosage = u63tod(machr2_dosage_sums[allele_idx]) * kRecipDosageMid;
           if (is_xchr_model_1) {
             // ugh.
-            a1_dosage = 0.0;
-            for (uint32_t sample_idx = 0; sample_idx != nm_sample_ct; ++sample_idx) {
-              a1_dosage += S_CAST(double, geno_col[sample_idx]);
+            double incr1 = 0.0;
+            double incr2 = 0.0;
+            for (uint32_t sample_idx = 1; sample_idx < nm_sample_ct; sample_idx += 2) {
+              incr1 += S_CAST(double, geno_col[sample_idx - 1]);
+              incr2 += S_CAST(double, geno_col[sample_idx]);
             }
+            if (nm_sample_ct % 2) {
+              incr1 += S_CAST(double, geno_col[nm_sample_ct - 1]);
+            }
+            a1_dosage = incr1 + incr2;
           } else {
             if (is_nonx_haploid) {
               a1_dosage *= 0.5;
@@ -1930,11 +1937,7 @@ THREAD_FUNC_DECL GlmLogisticThreadF(void* raw_arg) {
             // this computation in-place later).
             if (is_xchr_model_1) {
               main_dosage_sum = a1_dosage;
-              main_dosage_ssq = 0.0;
-              for (uint32_t sample_idx = 0; sample_idx != nm_sample_ct; ++sample_idx) {
-                const double cur_dosage = S_CAST(double, geno_col[sample_idx]);
-                main_dosage_ssq += cur_dosage * cur_dosage;
-              }
+              main_dosage_ssq = DotprodFD(geno_col, geno_col, nm_sample_ct);
             } else {
               main_dosage_sum = a1_dosage;
               main_dosage_ssq = u63tod(machr2_dosage_ssqs[allele_idx]) * kRecipDosageMidSq;
@@ -2098,9 +2101,7 @@ THREAD_FUNC_DECL GlmLogisticThreadF(void* raw_arg) {
               if (nonconst_extra_regression_idx) {
                 float* swap_target = &(multi_start[(nonconst_extra_regression_idx - 1) * nm_sample_ctav]);
                 for (uint32_t uii = 0; uii != nm_sample_ct; ++uii) {
-                  float fxx = genotype_vals[uii];
-                  genotype_vals[uii] = swap_target[uii];
-                  swap_target[uii] = fxx;
+                  swap_f32(&(genotype_vals[uii]), &(swap_target[uii]));
                 }
               }
             }
@@ -2815,7 +2816,7 @@ BoolErr LogisticRegressionD(const double* yy, const double* xx, const double* sa
     double* zz = vv;
     for (uint32_t sample_idx = 0; sample_idx != sample_ct; ++sample_idx) {
       // 2 * (ln 3 + 4/3)
-      zz[sample_idx] = (yy[sample_idx] - 0.5) * 4.863891244002886;
+      zz[sample_idx] = prefer_fma(yy[sample_idx], 4.863891244002886, -0.5 * 4.863891244002886);
     }
 
     // For the first iteration, we need to initialize coef in the same manner
@@ -4478,11 +4479,7 @@ THREAD_FUNC_DECL GlmLogisticThreadD(void* raw_arg) {
             // this computation in-place later).
             if (is_xchr_model_1) {
               main_dosage_sum = a1_dosage;
-              main_dosage_ssq = 0.0;
-              for (uint32_t sample_idx = 0; sample_idx != nm_sample_ct; ++sample_idx) {
-                const double cur_dosage = geno_col[sample_idx];
-                main_dosage_ssq += cur_dosage * cur_dosage;
-              }
+              main_dosage_ssq = DotprodD(geno_col, geno_col, nm_sample_ct);
             } else {
               main_dosage_sum = a1_dosage;
               main_dosage_ssq = u63tod(machr2_dosage_ssqs[allele_idx]) * kRecipDosageMidSq;
@@ -4645,9 +4642,7 @@ THREAD_FUNC_DECL GlmLogisticThreadD(void* raw_arg) {
               if (nonconst_extra_regression_idx) {
                 double* swap_target = &(multi_start[(nonconst_extra_regression_idx - 1) * nm_sample_ctav]);
                 for (uint32_t uii = 0; uii != nm_sample_ct; ++uii) {
-                  double dxx = genotype_vals[uii];
-                  genotype_vals[uii] = swap_target[uii];
-                  swap_target[uii] = dxx;
+                  swap_f64(&(genotype_vals[uii]), &(swap_target[uii]));
                 }
               }
             }

@@ -1,3 +1,23 @@
+# pgenlibr 0.6.2 (2026-06-05)
+Fixed .pvar loading bug that could occur when a variant had a single-character
+ID and a multi-character REF allele
+(https://github.com/chrchang/plink-ng/pull/333 ).
+
+# pgenlibr 0.6.1 (2026-03-28)
+Filled in missing pgenlibr::NewPvar() error message, and added workaround for
+systems with pthread_create() implementations which don't seem to support a
+custom stack-size attr.
+
+# pgenlibr 0.6.0 (2026-03-23)
+>15 MB of library source code files (libdeflate, SIMDe, zstd) are no longer
+kept after installation.  (If you were depending on these files, we apologize
+for the inconvenience; you should be able to switch to something like the
+tools/-based workflow that pgenlibr now uses.)
+
+# pgenlibr 0.5.3 (2025-06-24)
+HasSparse(), HasSparseHardcalls(), ReadSparse(), and ReadSparseHardcalls()
+functions added.
+
 # pgenlibr 0.4.0 (2025-01-15)
 CHROM and POS columns in .pvar are now loaded by default, and they can be
 checked with GetVariantChrom() and GetVariantPos().  NewPvar() should now work

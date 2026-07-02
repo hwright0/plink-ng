@@ -49,6 +49,7 @@ ZSSRC = zstd/lib/decompress/huf_decompress_amd64.S
 
 PGENLIB_CCSRC = include/plink2_base.cc \
                 include/plink2_bits.cc \
+                include/plink2_simd.cc \
                 include/pgenlib_misc.cc \
                 include/pgenlib_read.cc \
                 include/pgenlib_write.cc
@@ -56,7 +57,9 @@ PGENLIB_CCSRC = include/plink2_base.cc \
 PLINK2LIB_CCSRC = $(PGENLIB_CCSRC) \
                   include/plink2_bgzf.cc \
                   include/plink2_bitmap.cc \
+                  include/plink2_float.cc \
                   include/plink2_fmath.cc \
+                  include/plink2_highprec.cc \
                   include/plink2_htable.cc \
                   include/plink2_memory.cc \
                   include/plink2_stats.cc \
@@ -70,6 +73,7 @@ TEXTLIB_CCSRC = include/plink2_base.cc \
                 include/plink2_bgzf.cc \
                 include/plink2_htable.cc \
                 include/plink2_memory.cc \
+                include/plink2_simd.cc \
                 include/plink2_string.cc \
                 include/plink2_text.cc \
                 include/plink2_thread.cc \
@@ -106,7 +110,7 @@ CCSRC = $(PLINK2LIB_CCSRC) \
         plink2_random.cc \
         plink2_set.cc
 
-ZLIB_VER = 1.3.1
+ZLIB_VER = 1.3.2
 
 OBJ_NO_ZSTD = $(CSRC:.c=.o) $(CCSRC:.cc=.o)
 OBJ = $(CSRC:.c=.o) $(ZCSRC:.c=.o) $(ZSSRC:.S=.o) $(CCSRC:.cc=.o)

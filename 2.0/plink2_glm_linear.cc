@@ -23,6 +23,8 @@
 
 #include "include/pgenlib_misc.h"
 #include "include/plink2_bits.h"
+#include "include/plink2_float.h"
+#include "include/plink2_simd.h"
 #include "include/plink2_stats.h"
 #include "include/plink2_string.h"
 #include "include/plink2_thread.h"
@@ -1023,11 +1025,7 @@ THREAD_FUNC_DECL GlmLinearThread(void* raw_arg) {
             }
             if (!allele_ct_m2) {
               main_dosage_sum = a1_dosage;
-              main_dosage_ssq = 0.0;
-              for (uint32_t sample_idx = 0; sample_idx != nm_sample_ct; ++sample_idx) {
-                const double cur_dosage = geno_col[sample_idx];
-                main_dosage_ssq += cur_dosage * cur_dosage;
-              }
+              main_dosage_ssq = DotprodD(geno_col, geno_col, nm_sample_ct);
             }
           } else {
             if (is_nonx_haploid) {
@@ -1157,9 +1155,7 @@ THREAD_FUNC_DECL GlmLinearThread(void* raw_arg) {
               if (nonconst_extra_regression_idx) {
                 double* swap_target = &(multi_start[(nonconst_extra_regression_idx - 1) * nm_sample_ct]);
                 for (uint32_t uii = 0; uii != nm_sample_ct; ++uii) {
-                  double dxx = genotype_vals[uii];
-                  genotype_vals[uii] = swap_target[uii];
-                  swap_target[uii] = dxx;
+                  swap_f64(&(genotype_vals[uii]), &(swap_target[uii]));
                 }
               }
             }
@@ -1343,9 +1339,9 @@ THREAD_FUNC_DECL GlmLinearThread(void* raw_arg) {
                         const uint32_t sample_idx = sample_idx_base + (lowest_set_bit / 2);
                         const double geno_d = geno_d_lookup[lowest_set_bit & 1];
                         const double cur_pheno_val = nm_pheno_buf[sample_idx];
-                        geno_pheno_prod += geno_d * cur_pheno_val;
+                        geno_pheno_prod = prefer_fma(geno_d, cur_pheno_val, geno_pheno_prod);
                         for (uintptr_t pred_idx = domdev_third + 2; pred_idx != cur_predictor_ct; ++pred_idx) {
-                          geno_dotprod_row[pred_idx] += geno_d * nm_predictors_pmaj_buf[pred_idx * nm_sample_ct + sample_idx];
+                          geno_dotprod_row[pred_idx] = prefer_fma(geno_d, nm_predictors_pmaj_buf[pred_idx * nm_sample_ct + sample_idx], geno_dotprod_row[pred_idx]);
                         }
                         // can have a separate categorical loop here
 
@@ -1366,8 +1362,12 @@ THREAD_FUNC_DECL GlmLinearThread(void* raw_arg) {
                 xt_y[1] = geno_pheno_prod;
                 const double het_ctd = u31tod(genocounts[1]);
                 const double homalt_ctd = u31tod(genocounts[2]);
-                xtx_inv[cur_predictor_ct] = het_ctd * geno_d_lookup[0] + homalt_ctd * geno_d_lookup[1];
-                xtx_inv[cur_predictor_ct + 1] = het_ctd * geno_d_lookup[0] * geno_d_lookup[0] + homalt_ctd * geno_d_lookup[1] * geno_d_lookup[1];
+                const double lookup0 = geno_d_lookup[0];
+                const double lookup1 = geno_d_lookup[1];
+                const double het_x_lookup0 = het_ctd * lookup0;
+                const double homalt_x_lookup1 = homalt_ctd * lookup1;
+                xtx_inv[cur_predictor_ct] = het_x_lookup0 + homalt_x_lookup1;
+                xtx_inv[cur_predictor_ct + 1] = prefer_fma(het_x_lookup0, lookup0, homalt_x_lookup1 * lookup1);
                 if (domdev_third) {
                   xt_y[2] = domdev_pheno_prod;
                   xtx_inv[cur_predictor_ct + 2] = domdev_geno_prod;
@@ -3264,11 +3264,7 @@ THREAD_FUNC_DECL GlmLinearSubbatchThread(void* raw_arg) {
             }
             if (!allele_ct_m2) {
               main_dosage_sum = a1_dosage;
-              main_dosage_ssq = 0.0;
-              for (uint32_t sample_idx = 0; sample_idx != nm_sample_ct; ++sample_idx) {
-                const double cur_dosage = geno_col[sample_idx];
-                main_dosage_ssq += cur_dosage * cur_dosage;
-              }
+              main_dosage_ssq = DotprodD(geno_col, geno_col, nm_sample_ct);
             }
           } else {
             if (is_nonx_haploid) {
@@ -3401,9 +3397,7 @@ THREAD_FUNC_DECL GlmLinearSubbatchThread(void* raw_arg) {
               if (nonconst_extra_regression_idx) {
                 double* swap_target = &(multi_start[(nonconst_extra_regression_idx - 1) * nm_sample_ct]);
                 for (uint32_t uii = 0; uii != nm_sample_ct; ++uii) {
-                  double dxx = genotype_vals[uii];
-                  genotype_vals[uii] = swap_target[uii];
-                  swap_target[uii] = dxx;
+                  swap_f64(&(genotype_vals[uii]), &(swap_target[uii]));
                 }
               }
             }
@@ -3532,13 +3526,13 @@ THREAD_FUNC_DECL GlmLinearSubbatchThread(void* raw_arg) {
                               // domdev = 1
                               for (uint32_t pheno_idx = 0; pheno_idx != subbatch_size; ++pheno_idx) {
                                 const double cur_pheno_val = cur_pheno_pmaj[pheno_idx * cur_sample_ct + sample_midx];
-                                geno_pheno_prods[pheno_idx] += geno_d * cur_pheno_val;
+                                geno_pheno_prods[pheno_idx] = prefer_fma(geno_d, cur_pheno_val, geno_pheno_prods[pheno_idx]);
                                 domdev_pheno_prods[pheno_idx] += cur_pheno_val;
                               }
                               domdev_geno_prod += geno_d;
                             } else {
                               for (uint32_t pheno_idx = 0; pheno_idx != subbatch_size; ++pheno_idx) {
-                                geno_pheno_prods[pheno_idx] += geno_d * cur_pheno_pmaj[pheno_idx * cur_sample_ct + sample_midx];
+                                geno_pheno_prods[pheno_idx] = prefer_fma(geno_d, cur_pheno_pmaj[pheno_idx * cur_sample_ct + sample_midx], geno_pheno_prods[pheno_idx]);
                               }
                             }
                           }
@@ -3574,13 +3568,13 @@ THREAD_FUNC_DECL GlmLinearSubbatchThread(void* raw_arg) {
                           // domdev = 1
                           for (uint32_t pheno_idx = 0; pheno_idx != subbatch_size; ++pheno_idx) {
                             const double cur_pheno_val = cur_pheno_pmaj[pheno_idx * cur_sample_ct + sample_midx];
-                            geno_pheno_prods[pheno_idx] += geno_d * cur_pheno_val;
+                            geno_pheno_prods[pheno_idx] = prefer_fma(geno_d, cur_pheno_val, geno_pheno_prods[pheno_idx]);
                             domdev_pheno_prods[pheno_idx] += cur_pheno_val;
                           }
                           domdev_geno_prod += geno_d;
                         } else {
                           for (uint32_t pheno_idx = 0; pheno_idx != subbatch_size; ++pheno_idx) {
-                            geno_pheno_prods[pheno_idx] += geno_d * cur_pheno_pmaj[pheno_idx * cur_sample_ct + sample_midx];
+                            geno_pheno_prods[pheno_idx] = prefer_fma(geno_d, cur_pheno_pmaj[pheno_idx * cur_sample_ct + sample_midx], geno_pheno_prods[pheno_idx]);
                           }
                         }
                         geno_word &= geno_word - 1;
@@ -3603,7 +3597,7 @@ THREAD_FUNC_DECL GlmLinearSubbatchThread(void* raw_arg) {
                         const uint32_t sample_idx = sample_idx_base + (lowest_set_bit / 2);
                         const double geno_d = geno_d_lookup[lowest_set_bit & 1];
                         for (uintptr_t pred_idx = domdev_third + 2; pred_idx != cur_predictor_ct; ++pred_idx) {
-                          geno_dotprod_row[pred_idx] += geno_d * nm_predictors_pmaj_buf[pred_idx * nm_sample_ct + sample_idx];
+                          geno_dotprod_row[pred_idx] = prefer_fma(geno_d, nm_predictors_pmaj_buf[pred_idx * nm_sample_ct + sample_idx], geno_dotprod_row[pred_idx]);
                         }
                         // can have a separate categorical loop here
 
@@ -3611,7 +3605,7 @@ THREAD_FUNC_DECL GlmLinearSubbatchThread(void* raw_arg) {
                           // domdev = 1
                           for (uint32_t pheno_idx = 0; pheno_idx != subbatch_size; ++pheno_idx) {
                             const double cur_pheno_val = nm_pheno_buf[pheno_idx * nm_sample_ct + sample_idx];
-                            geno_pheno_prods[pheno_idx] += geno_d * cur_pheno_val;
+                            geno_pheno_prods[pheno_idx] = prefer_fma(geno_d, cur_pheno_val, geno_pheno_prods[pheno_idx]);
                             domdev_pheno_prods[pheno_idx] += cur_pheno_val;
                           }
                           domdev_geno_prod += geno_d;
@@ -3621,7 +3615,7 @@ THREAD_FUNC_DECL GlmLinearSubbatchThread(void* raw_arg) {
                           // categorical optimization possible here
                         } else {
                           for (uint32_t pheno_idx = 0; pheno_idx != subbatch_size; ++pheno_idx) {
-                            geno_pheno_prods[pheno_idx] += geno_d * nm_pheno_buf[pheno_idx * nm_sample_ct + sample_idx];
+                            geno_pheno_prods[pheno_idx] = prefer_fma(geno_d, nm_pheno_buf[pheno_idx * nm_sample_ct + sample_idx], geno_pheno_prods[pheno_idx]);
                           }
                         }
                         geno_word &= geno_word - 1;
@@ -3631,8 +3625,12 @@ THREAD_FUNC_DECL GlmLinearSubbatchThread(void* raw_arg) {
                 }
                 const double het_ctd = u31tod(genocounts[1]);
                 const double homalt_ctd = u31tod(genocounts[2]);
-                xtx_inv[cur_predictor_ct] = het_ctd * geno_d_lookup[0] + homalt_ctd * geno_d_lookup[1];
-                xtx_inv[cur_predictor_ct + 1] = het_ctd * geno_d_lookup[0] * geno_d_lookup[0] + homalt_ctd * geno_d_lookup[1] * geno_d_lookup[1];
+                const double lookup0 = geno_d_lookup[0];
+                const double lookup1 = geno_d_lookup[1];
+                const double het_x_lookup0 = het_ctd * lookup0;
+                const double homalt_x_lookup1 = homalt_ctd * lookup1;
+                xtx_inv[cur_predictor_ct] = het_x_lookup0 + homalt_x_lookup1;
+                xtx_inv[cur_predictor_ct + 1] = prefer_fma(het_x_lookup0, lookup0, homalt_x_lookup1 * lookup1);
                 if (domdev_third) {
                   xtx_inv[cur_predictor_ct + 2] = domdev_geno_prod;
                   xtx_inv[2 * cur_predictor_ct] = het_ctd;

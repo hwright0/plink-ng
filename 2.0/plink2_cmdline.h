@@ -217,13 +217,9 @@ HEADER_INLINE uint32_t ClipU32(uint32_t val, uint32_t lbound, uint32_t ubound) {
   return MAXV(val, lbound);
 }
 
-int32_t u32cmp(const void* aa, const void* bb);
-
-int32_t double_cmp(const void* aa, const void* bb);
+// u32cmp, u64cmp, and double_cmp moved to plink2_base
 
 int32_t double_cmp_decr(const void* aa, const void* bb);
-
-int32_t u64cmp(const void* aa, const void* bb);
 
 #ifndef __cplusplus
 int32_t u64cmp_decr(const void* aa, const void* bb);
@@ -1804,8 +1800,6 @@ HEADER_INLINE uint32_t CmpExprIsJct(CmpExprType etype) {
   return (etype >= kCmpExprTypeAnd);
 }
 
-struct CmpExprStruct;
-
 // <key> existence check
 typedef struct CmpExprKStruct {
   char* key;
@@ -1827,6 +1821,8 @@ typedef struct CmpExprKSStruct {
 
 // and, or, not
 typedef struct CmpExprJctStruct {
+  // no CmpExprStruct forward declaration needed, since this is just a pointer
+  // and CmpExprStruct is defined within this file
   struct CmpExprStruct* children[2];
 } CmpExprJct;
 

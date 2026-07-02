@@ -24,7 +24,9 @@
 
 #include "include/plink2_bgzf.h"
 #include "include/plink2_bits.h"
+#include "include/plink2_float.h"
 #include "include/plink2_htable.h"
+#include "include/plink2_simd.h"
 #include "include/plink2_string.h"
 #include "include/plink2_text.h"
 #include "include/plink2_thread.h"
@@ -2235,9 +2237,7 @@ THREAD_FUNC_DECL ExportBgen13Thread(void* raw_arg) {
                   output_prob2 = (cur_dosage * max_output_val + kDosage4th) / kDosageMid;
                 }
                 if (IsSet(pgv.phaseinfo, sample_uidx)) {
-                  const uint32_t tmpval = output_prob1;
-                  output_prob1 = output_prob2;
-                  output_prob2 = tmpval;
+                  swap_u32(&output_prob1, &output_prob2);
                 }
               } else {
                 // unphased
@@ -2623,9 +2623,7 @@ THREAD_FUNC_DECL ExportBgen13Thread(void* raw_arg) {
                         output_prob2 = (cur_dosage * max_output_val + kDosage4th) / kDosageMid;
                       }
                       if (phaseinfo_hw & shifted_bit) {
-                        const uint32_t tmpval = output_prob1;
-                        output_prob1 = output_prob2;
-                        output_prob2 = tmpval;
+                        swap_u32(&output_prob1, &output_prob2);
                       }
                     }
                   } else {
@@ -5565,9 +5563,7 @@ PglErr ExportVcf(const uintptr_t* sample_include, const uint32_t* sample_include
                         if (phasepresent_hw & cur_shift) {
                           prev_phased_halfword |= cur_shift;
                           if (phaseinfo_hw & cur_shift) {
-                            const AlleleCode ac_swap = ac0;
-                            ac0 = ac1;
-                            ac1 = ac_swap;
+                            swap_ac(&ac0, &ac1);
                           }
                         } else {
                           prev_phased_halfword &= ~cur_shift;
@@ -5628,9 +5624,7 @@ PglErr ExportVcf(const uintptr_t* sample_include, const uint32_t* sample_include
                         if (phasepresent_hw & cur_shift) {
                           prev_phased_halfword |= cur_shift;
                           if (phaseinfo_hw & cur_shift) {
-                            const AlleleCode ac_swap = ac0;
-                            ac0 = ac1;
-                            ac1 = ac_swap;
+                            swap_ac(&ac0, &ac1);
                           }
                         } else {
                           prev_phased_halfword &= ~cur_shift;
@@ -5711,9 +5705,7 @@ PglErr ExportVcf(const uintptr_t* sample_include, const uint32_t* sample_include
                         if (phasepresent_hw & cur_shift) {
                           prev_phased_halfword |= cur_shift;
                           if (phaseinfo_hw & cur_shift) {
-                            const AlleleCode ac_swap = ac0;
-                            ac0 = ac1;
-                            ac1 = ac_swap;
+                            swap_ac(&ac0, &ac1);
                           }
                         } else {
                           prev_phased_halfword &= ~cur_shift;
@@ -8518,7 +8510,7 @@ PglErr ExportBcf(const uintptr_t* sample_include, const uint32_t* sample_include
                     double dxx;
                     const char* floatstr_end = ScanadvDouble(value_iter, &dxx);
                     if (floatstr_end) {
-                      if (unlikely(fabs(dxx) > 3.4028235677973362e38)) {
+                      if (unlikely(fabs(dxx) > FLT_MAX_D)) {
                         snprintf(g_logbuf, kLogbufSize, "Error: --export bcf: Variant '%s' has an out-of-range INFO/%s value.\n", variant_id, fif_keys[fif_idx]);
                         goto ExportBcf_ret_MALFORMED_INPUT_WW;
                       }

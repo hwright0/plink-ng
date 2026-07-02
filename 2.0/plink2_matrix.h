@@ -27,13 +27,14 @@
 // referred to as LAPACK_<fname>(), and the integer index type is lapack_int.
 
 #include "include/plink2_base.h"
+#include "include/plink2_simd.h"
 
 #ifdef NOLAPACK
 typedef double MatrixInvertBuf1;
 CONSTI32(kMatrixInvertBuf1ElemAlloc, 2 * sizeof(double));
 CONSTI32(kMatrixInvertBuf1CheckedAlloc, 2 * sizeof(double));
 #  define lapack_int int
-
+#  define BLAS_SET_NUM_THREADS(num)
 #else  // not NOLAPACK
 
 // 1. Define LAPACK_ILP64 and USE_MKL consistently.
@@ -274,22 +275,45 @@ HEADER_INLINE void FillFVec(uintptr_t ct, float fxx, float* dst) {
 #endif
 
 HEADER_INLINE double DotprodDShort(const double* vec1, const double* vec2, uint32_t ct) {
-  double dotprod = 0.0;
-  for (uint32_t uii = 0; uii != ct; ++uii) {
-    dotprod += vec1[uii] * vec2[uii];
+  double acc1 = 0.0;
+  double acc2 = 0.0;
+  for (uint32_t uii = 1; uii < ct; uii += 2) {
+    acc1 += vec1[uii - 1] * vec2[uii - 1];
+    acc2 += vec1[uii] * vec2[uii];
   }
-  return dotprod;
+  if (ct % 2) {
+    acc1 += vec1[ct - 1] * vec2[ct - 1];
+  }
+  return acc1 + acc2;
 }
 
 HEADER_INLINE float DotprodFShort(const float* vec1, const float* vec2, uint32_t ct) {
-  float dotprod = 0.0;
-  for (uint32_t uii = 0; uii != ct; ++uii) {
-    dotprod += vec1[uii] * vec2[uii];
+  float acc1 = 0.0;
+  float acc2 = 0.0;
+  for (uint32_t uii = 1; uii < ct; uii += 2) {
+    acc1 += vec1[uii - 1] * vec2[uii - 1];
+    acc2 += vec1[uii] * vec2[uii];
   }
-  return dotprod;
+  if (ct % 2) {
+    acc1 += vec1[ct - 1] * vec2[ct - 1];
+  }
+  return acc1 + acc2;
 }
 
-// todo: benchmark again after Spectre/Meltdown mitigation is deployed
+HEADER_INLINE double DotprodFDShort(const float* vec1, const float* vec2, uint32_t ct) {
+  double acc1 = 0.0;
+  double acc2 = 0.0;
+  for (uint32_t uii = 1; uii < ct; uii += 2) {
+    acc1 += S_CAST(double, vec1[uii - 1]) * S_CAST(double, vec2[uii - 1]);
+    acc2 += S_CAST(double, vec1[uii]) * S_CAST(double, vec2[uii]);
+  }
+  if (ct % 2) {
+    acc1 += S_CAST(double, vec1[ct - 1]) * S_CAST(double, vec2[ct - 1]);
+  }
+  return acc1 + acc2;
+}
+
+// todo: benchmark again, last round was before Spectre/Meltdown mitigations
 CONSTI32(kDotprodDThresh, 17);
 CONSTI32(kDotprodFThresh, 15);
 
@@ -304,6 +328,10 @@ HEADER_INLINE double DotprodxD(const double* vec1, const double* vec2, uint32_t 
 
 HEADER_INLINE float DotprodF(const float* vec1, const float* vec2, uint32_t ct) {
   return DotprodFShort(vec1, vec2, ct);
+}
+
+HEADER_INLINE double DotprodFD(const float* vec1, const float* vec2, uint32_t ct) {
+  return DotprodFDShort(vec1, vec2, ct);
 }
 
 BoolErr InvertMatrix(int32_t dim, double* matrix, MatrixInvertBuf1* dbl_1d_buf, double* dbl_2d_buf);
@@ -389,6 +417,10 @@ HEADER_INLINE double DotprodxD(const double* vec1, const double* vec2, uint32_t 
 // not worthwhile for ct < 16.
 HEADER_INLINE float DotprodF(const float* vec1, const float* vec2, uint32_t ct) {
   return cblas_sdot(ct, vec1, 1, vec2, 1);
+}
+
+HEADER_INLINE double DotprodFD(const float* vec1, const float* vec2, uint32_t ct) {
+  return cblas_dsdot(ct, vec1, 1, vec2, 1);
 }
 
 // extra if-statement in DotprodxF() seems disproportionally expensive in

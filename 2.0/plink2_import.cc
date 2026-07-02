@@ -27,8 +27,10 @@
 #include "include/pgenlib_write.h"
 #include "include/plink2_bgzf.h"
 #include "include/plink2_bits.h"
+#include "include/plink2_float.h"
 #include "include/plink2_htable.h"
 #include "include/plink2_memory.h"
+#include "include/plink2_simd.h"
 #include "include/plink2_string.h"
 #include "include/plink2_text.h"
 #include "include/plink2_thread.h"
@@ -13480,12 +13482,8 @@ PglErr OxBgenToPgen(const char* bgenname, const char* samplename, const char* co
             }
             *pvar_cswritep++ = '\t';
             if (prov_ref_allele_second) {
-              uint32_t swap_slen = a1_slen;
-              a1_slen = a2_slen;
-              a2_slen = swap_slen;
-              char* swap_ptr = a1_ptr;
-              a1_ptr = a2_ptr;
-              a2_ptr = swap_ptr;
+              swap_u32(&a1_slen, &a2_slen);
+              swap_cp(&a1_ptr, &a2_ptr);
             }
             if (unlikely(Cswrite(&pvar_css, &pvar_cswritep))) {
               goto OxBgenToPgen_ret_WRITE_FAIL;

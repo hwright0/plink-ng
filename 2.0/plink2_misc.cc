@@ -23,7 +23,9 @@
 #include <string.h>
 
 #include "include/plink2_bits.h"
+#include "include/plink2_float.h"
 #include "include/plink2_htable.h"
+#include "include/plink2_simd.h"
 #include "include/plink2_stats.h"
 #include "include/plink2_string.h"
 #include "include/plink2_text.h"
@@ -5213,9 +5215,11 @@ typedef struct ComputeHweXLnPvalsCtxStruct {
   uint32_t hwe_x_ct;
 
   double* hwe_x_ln_pvals;
+
+  uint32_t oom;
 } ComputeHweXLnPvalsCtx;
 
-void ComputeHweXLnPvalsMain(uintptr_t tidx, uintptr_t thread_ct, ComputeHweXLnPvalsCtx* ctx) {
+BoolErr ComputeHweXLnPvalsMain(uintptr_t tidx, uintptr_t thread_ct, ComputeHweXLnPvalsCtx* ctx) {
   const uintptr_t* variant_include = ctx->variant_include;
   const uintptr_t* allele_idx_offsets = ctx->allele_idx_offsets;
   const STD_ARRAY_PTR_DECL(uint32_t, 3, founder_raw_geno_cts) = ctx->founder_raw_geno_cts;
@@ -5301,12 +5305,15 @@ void ComputeHweXLnPvalsMain(uintptr_t tidx, uintptr_t thread_ct, ComputeHweXLnPv
   if (pct > 10) {
     putc_unlocked('\b', stdout);
   }
+  return 0;
 }
 
 THREAD_FUNC_DECL ComputeHweXLnPvalsThread(void* raw_arg) {
   ThreadGroupFuncArg* arg = S_CAST(ThreadGroupFuncArg*, raw_arg);
   ComputeHweXLnPvalsCtx* ctx = S_CAST(ComputeHweXLnPvalsCtx*, arg->sharedp->context);
-  ComputeHweXLnPvalsMain(arg->tidx, GetThreadCt(arg->sharedp) + 1, ctx);
+  if (unlikely(ComputeHweXLnPvalsMain(arg->tidx, GetThreadCt(arg->sharedp) + 1, ctx))) {
+    ctx->oom = 1;
+  }
   THREAD_RETURN;
 }
 
@@ -5353,6 +5360,7 @@ PglErr ComputeHweXLnPvals(const uintptr_t* variant_include, const uintptr_t* all
     ctx.x_start = x_start;
     ctx.hwe_x_ct = hwe_x_ct;
     ctx.hwe_midp = hwe_midp;
+    ctx.oom = 0;
     logprintf("Computing chrX Hardy-Weinberg %sp-values... ", hwe_midp? "mid" : "");
     fputs("0%", stdout);
     fflush(stdout);
@@ -5363,8 +5371,13 @@ PglErr ComputeHweXLnPvals(const uintptr_t* variant_include, const uintptr_t* all
         goto ComputeHweXLnPvals_ret_THREAD_CREATE_FAIL;
       }
     }
-    ComputeHweXLnPvalsMain(calc_thread_ct - 1, calc_thread_ct, &ctx);
+    if (unlikely(ComputeHweXLnPvalsMain(calc_thread_ct - 1, calc_thread_ct, &ctx))) {
+      ctx.oom = 1;
+    }
     JoinThreads0(&tg);
+    if (unlikely(ctx.oom)) {
+      goto ComputeHweXLnPvals_ret_NOMEM;
+    }
     fputs("\b\b", stdout);
     logputs("done.\n");
   }

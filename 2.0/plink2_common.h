@@ -31,6 +31,7 @@
 #include "include/pgenlib_read.h"
 #include "include/plink2_base.h"
 #include "include/plink2_bits.h"
+#include "include/plink2_simd.h"
 #include "include/plink2_string.h"
 #include "include/plink2_text.h"
 #include "include/plink2_thread.h"
@@ -50,6 +51,8 @@ namespace plink2 {
 
 #define PROG_NAME_STR "plink2"
 
+// only worth using in tight loops with many iterations, otherwise just cast
+// todo: put some benchmark numbers here
 extern const double kSmallDoubles[4];
 
 // Exclude 0x7fffffff, since the half-open interval containing it ends in
