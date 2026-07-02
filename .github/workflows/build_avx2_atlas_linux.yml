@@ -1,0 +1,70 @@
+name: Build plink2 (Linux AVX2, static ATLAS)
+
+# Mirrors the repo's "avx2+atlas" recipe (top-level 2.0/Makefile +
+# 2.0/build.sh's avx2+atlas template) as closely as possible, with corrections
+# applied directly instead of going through build.sh:
+#   1. -mavx2/-mbmi/-mbmi2/-mfma/-mlzcnt are applied to CXXFLAGS too (build.sh
+#      only applies -mavx2/-mbmi/-mbmi2/-mlzcnt to CFLAGS, but nearly all
+#      plink2 code is .cc).
+#   2. -mfma is added (build.sh omits it, but plink2_simd.h's 32-byte float
+#      vector path requires FMA3 whenever AVX2 is enabled).
+#   3. The redundant/legacy "-llapack -lcblas -lblas" prefix that build.sh
+#      always prepends is dropped; only the atlas-specific link line is used.
+#   4. -llapacke is added: plink2_matrix.h includes <lapacke.h> and relies on
+#      its LAPACK_* macros for the ATLAS/OpenBLAS/AOCL backend, so liblapacke
+#      (header + library) is required, not just liblapack.
+#   5. -lcblas is added: on Ubuntu, liblapack-dev's liblapack.a resolves (via
+#      update-alternatives) to ATLAS's own LAPACK build, whose routines call
+#      cblas_* functions that only libcblas.a provides.
+#   6. -lgfortran/-lquadmath are added inside the static block: ATLAS's
+#      liblapack.a is built with gfortran, and static archives (unlike .so)
+#      don't carry their own dependency metadata, so these must be listed
+#      explicitly.
+#   7. The static libs are wrapped in --start-group/--end-group, since
+#      liblapacke/liblapack/libcblas/libf77blas/libatlas have circular-ish
+#      mutual dependencies and plain left-to-right link order isn't reliable.
+#   8. libzstd-dev is installed: the top-level Makefile's BASEFLAGS hardcodes
+#      -DIGNORE_BUNDLED_ZSTD (not overridable via env, since it's a plain "="
+#      assignment), which makes plink2_zstfile.h require the system zstd.h at
+#      compile time, even though the bundled zstd .c sources are still
+#      compiled in and no runtime libzstd.so dependency results.
+# BLAS/LAPACK/ATLAS are wrapped in -Wl,-Bstatic/-Bdynamic so the resulting
+# binary has no runtime dependency on them (matches the self-contained
+# behavior of the official downloads). glibc/zlib are left dynamic.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gfortran libatlas-base-dev liblapack-dev liblapacke-dev libzstd-dev zlib1g-dev
+
+      - name: Build (top-level Makefile, AVX2 + static ATLAS/LAPACK)
+        working-directory: "2.0"
+        run: |
+          make -f Makefile clean
+          CFLAGS="-O3 -mavx2 -mbmi -mbmi2 -mfma -mlzcnt -DNDEBUG" \
+          CXXFLAGS="-O2 -mavx2 -mbmi -mbmi2 -mfma -mlzcnt -DNDEBUG" \
+          BLASFLAGS64="-Wl,-Bstatic -Wl,--start-group -llapacke -llapack -lcblas -lf77blas -latlas -lgfortran -lquadmath -Wl,--end-group -Wl,-Bdynamic" \
+          make -f Makefile
+
+      - name: Strip debug symbols
+        working-directory: "2.0"
+        run: strip bin/plink2
+
+      - name: Verify remaining dynamic dependencies
+        working-directory: "2.0"
+        run: ldd bin/plink2
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: plink2-linux-avx2-x86_64
+          path: 2.0/bin/plink2
