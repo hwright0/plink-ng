@@ -8194,6 +8194,8 @@ PglErr MakePgenRobust(const uintptr_t* sample_include, const uint32_t* new_sampl
                       ++shifted_het_idx;
                     }
                     assert(phasepresent_idx == new_phasepresent_ct);
+                    // advance past the phaseinfo section
+                    loadbuf_iter = &(part1_end[new_phasepresent_ctl]);
                   }
                   assert(regular_idx == UINT32_MAX);
                   *regular_stop = orig_regular_end;
