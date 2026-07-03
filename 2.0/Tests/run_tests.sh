@@ -58,4 +58,9 @@ cd TEST_ONE_WAY_EXPORT
 cd ..
 echo "TEST_ONE_WAY_EXPORT passed."
 
+cd TEST_NORMALIZE
+./run_tests.sh $d $2 $3 > TEST_NORMALIZE.log
+cd ..
+echo "TEST_NORMALIZE passed."
+
 echo "All tests passed."

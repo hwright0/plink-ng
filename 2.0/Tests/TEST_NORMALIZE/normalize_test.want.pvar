@@ -1,0 +1,5 @@
+##contig=<ID=1,length=17>
+#CHROM	POS	ID	REF	ALT
+1	2	del1C	GC	G
+1	2	ins1C	G	GC
+1	6	ins2A	C	CAA
