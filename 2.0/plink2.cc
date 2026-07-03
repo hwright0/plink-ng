@@ -62,7 +62,7 @@
 namespace plink2 {
 #endif
 
-static PREFER_CONSTEXPR char ver_str[] = "PLINK v2.0.0-a.7.1.a"
+static PREFER_CONSTEXPR char ver_str[] = "PLINK v2.0.0-a.7.1.a.mod"
 #ifdef NOLAPACK
   "NL"
 #elif defined(LAPACK_ILP64)
@@ -90,7 +90,7 @@ static PREFER_CONSTEXPR char ver_str[] = "PLINK v2.0.0-a.7.1.a"
 #elif defined(USE_AOCL)
   " AMD"
 #endif
-  " (3 Jun 2026)";
+  " (3 Jul 2026)";
 static PREFER_CONSTEXPR char ver_str2[] =
   // include leading space if day < 10, so character length stays the same
   " "
@@ -119,9 +119,10 @@ static PREFER_CONSTEXPR char ver_str2[] =
 #endif
 
   "   cog-genomics.org/plink/2.0/\n"
-  "(C) 2005-2026 Shaun Purcell, Christopher Chang    GNU General Public License v3\n";
+  "(C) 2005-2026 Shaun Purcell, Christopher Chang    GNU General Public License v3\n"
+  "MODIFIED by ExeterGenetics team to enable genotype-qc and non-ref priority merge\n";
 #ifdef HAS_CONSTEXPR
-static_assert(CompileTimeSlen(ver_str) + CompileTimeSlen(ver_str2) == 160, "ver_str/ver_str2 must be updated");
+static_assert(CompileTimeSlen(ver_str) + CompileTimeSlen(ver_str2) == 245, "ver_str/ver_str2 must be updated");
 #endif
 static const char errstr_append[] = "For more info, try \"" PROG_NAME_STR " --help <flag name>\" or \"" PROG_NAME_STR " --help | more\".\n";
 
