@@ -404,8 +404,26 @@ PglErr VNormalizeContig(const uintptr_t* variant_include, const char* const* var
       }
       const uint32_t orig_alen = alen_buf[aidx];
       if (orig_alen <= rtrim) {
-        // Must be single-character from .fa.
-        cur_alleles[aidx] = &(g_one_char_strs[2 * ctou32(prev_ref[S_CAST(int32_t, orig_alen - rtrim)])]);
+        // The original allele bases were entirely removed by right-trimming, so
+        // this allele's normalized content is taken from the left-shifted
+        // reference.  (This branch is only reachable when lshift >= 1, i.e.
+        // shifted_ref is set and ltrim == 0.)  Usually that's a single base,
+        // but when the left-shift spans more bases than were trimmed away the
+        // result is multiple reference bases -- e.g. an insertion into a tandem
+        // repeat that left-aligns several bases upstream.
+        const uint32_t new_slen = orig_alen + lshift - rtrim;
+        if (new_slen == 1) {
+          cur_alleles[aidx] = &(g_one_char_strs[2 * ctou32(shifted_ref[0])]);
+        } else {
+          if (S_CAST(uintptr_t, alloc_end - alloc_base) <= new_slen) {
+            return kPglRetNomem;
+          }
+          alloc_end -= new_slen + 1;
+          char* new_allele = R_CAST(char*, alloc_end);
+          char* new_allele_iter = memcpya(new_allele, shifted_ref, new_slen);
+          *new_allele_iter = '\0';
+          cur_alleles[aidx] = new_allele;
+        }
       } else {
         uint32_t new_slen = orig_alen + lshift - rtrim - ltrim;
         const char* cur_allele = &(cur_alleles[aidx][ltrim]);
