@@ -1,0 +1,80 @@
+name: Build plink2 (Linux AVX2, portable/static)
+
+# Produces a self-contained AVX2 plink2 binary for machines where you cannot
+# install packages (no sudo) and where headers/shared libs such as zlib.h /
+# libz.so are missing.  It is built like the official "Linux AVX2 Intel"
+# download: everything is linked statically -- BLAS/LAPACK (OpenBLAS + reference
+# LAPACKE), gfortran/quadmath, zlib, zstd, libstdc++/libgcc, AND glibc -- so the
+# resulting binary has no runtime library dependencies at all and does not care
+# what glibc version the target has.
+#
+# You do NOT compile anything on the target machine.  Download the artifact from
+# the finished run, `chmod +x plink2`, and run it.
+#
+# Notes / knobs:
+#   * Built via the production 2.0/build_dynamic Makefile, which already
+#     defaults to AVX2 and to compiling zstd from the bundled sources
+#     (STATIC_ZSTD=1), so no libzstd is needed at build or run time.
+#   * zlib is the only remaining shared dep the Makefile adds by default; we
+#     override LINKFLAGS to drop its dynamic "-lz" and instead pull libz.a
+#     inside the static BLASFLAGS group.
+#   * If the fully-static link ever fails (rare, e.g. an OpenBLAS variant that
+#     needs OpenMP), add "-lgomp" inside the --start-group, or fall back to the
+#     "static everything except glibc" variant by replacing the two override
+#     lines below with:
+#       BLASFLAGS="-Wl,-Bstatic -Wl,--start-group -llapacke -llapack -lopenblas -Wl,--end-group -lgfortran -lquadmath -lz -Wl,-Bdynamic -static-libstdc++ -static-libgcc"
+#       LINKFLAGS="-lm -lpthread -ldl"
+#     That leaves only glibc dynamic (works if the target's glibc >= this
+#     runner's, which is the case for anything that already runs the official
+#     download).
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential gfortran \
+            libopenblas-dev liblapack-dev liblapacke-dev \
+            zlib1g-dev
+
+      - name: Build (AVX2, fully static)
+        working-directory: 2.0/build_dynamic
+        run: |
+          make clean
+          make \
+            BLASFLAGS="-static -Wl,--start-group -llapacke -llapack -lopenblas -lgfortran -lquadmath -lz -lm -lpthread -ldl -Wl,--end-group" \
+            LINKFLAGS=" "
+
+      - name: Strip debug symbols
+        working-directory: 2.0/build_dynamic
+        run: strip plink2
+
+      - name: Verify it is static and runs
+        working-directory: 2.0/build_dynamic
+        run: |
+          file plink2
+          # A fully static binary has no dynamic deps; ldd prints
+          # "not a dynamic executable" and returns non-zero, so don't fail on it.
+          ldd plink2 || true
+          ./plink2 --version
+
+      - name: Smoke test (exercises file I/O + zstd)
+        working-directory: 2.0/build_dynamic
+        run: |
+          ./plink2 --dummy 20 50 --make-pgen --out smoke
+          ./plink2 --pfile smoke --freq --out smoke_freq
+          head smoke_freq.afreq
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: plink2-linux-avx2-portable-x86_64
+          path: 2.0/build_dynamic/plink2
