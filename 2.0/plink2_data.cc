@@ -8049,6 +8049,27 @@ PglErr MakePgenRobust(const uintptr_t* sample_include, const uint32_t* new_sampl
                   for (uint32_t aidx = cur_read_allele_ct - 1; aidx; --aidx) {
                     alt_invphase_one_sample_idx_starts[aidx] = alt_invphase_one_sample_idx_starts[aidx - 1];
                   }
+                  // Each allele's "regular" sample-index list is filled in two
+                  // passes per word (0/x and 1/1 hom entries first, then x/y
+                  // patch_10 hets), so a patch_10 het with a lower sample index
+                  // than a preceding 0/x het leaves the list out of
+                  // sample-index order.  The hphase encoder below walks these
+                  // lists in list order, but the reader reconstructs phase in
+                  // all_hets (sample-index) order, so an unsorted list silently
+                  // mis-assigns phasepresent/phaseinfo bits to the wrong
+                  // samples.  Restore sample order here.  (invphase lists only
+                  // receive patch_10 entries, already in ascending order, and
+                  // regular lists can only be perturbed when patch_10 hets are
+                  // present, so this is gated on patch_10_ct.)
+                  if (pgv.patch_10_ct) {
+                    for (uint32_t aidx = 1; aidx != cur_read_allele_ct; ++aidx) {
+                      uint32_t* list_start = alt_regular_one_sample_idx_starts[aidx];
+                      const uintptr_t list_len = alt_regular_one_sample_idx_starts[aidx + 1] - list_start;
+                      if (list_len > 1) {
+                        STD_SORT(list_len, u32cmp, list_start);
+                      }
+                    }
+                  }
                 }
                 // todo: multiallelic dosage
 
