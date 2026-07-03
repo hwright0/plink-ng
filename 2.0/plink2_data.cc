@@ -8168,8 +8168,8 @@ PglErr MakePgenRobust(const uintptr_t* sample_include, const uint32_t* new_sampl
                     loadbuf_iter[0] = new_het_ct;
                     loadbuf_iter[1] = new_phasepresent_ct;
 #endif
-                    shifted_part1[0] = 1;
                     memset(shifted_part1, 0, (1 + het_ctdl) * sizeof(intptr_t));
+                    shifted_part1[0] = 1;
                     // shifted_part1 is phasepresent
                     // part1_end is start of phaseinfo
                     const uint32_t new_phasepresent_ctl = BitCtToWordCt(new_phasepresent_ct);
