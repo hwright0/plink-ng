@@ -63,4 +63,9 @@ cd TEST_NORMALIZE
 cd ..
 echo "TEST_NORMALIZE passed."
 
+cd TEST_MULTIALLELIC_SPLIT
+./run_tests.sh $d $2 $3 > TEST_MULTIALLELIC_SPLIT.log
+cd ..
+echo "TEST_MULTIALLELIC_SPLIT passed."
+
 echo "All tests passed."
