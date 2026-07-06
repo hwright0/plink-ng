@@ -62,7 +62,7 @@
 namespace plink2 {
 #endif
 
-static PREFER_CONSTEXPR char ver_str[] = "PLINK v2.0.0-a.7.1.a.mod"
+static PREFER_CONSTEXPR char ver_str[] = "PLINK v2.0.0-a.7.1.a.m"
 #ifdef NOLAPACK
   "NL"
 #elif defined(LAPACK_ILP64)
@@ -90,7 +90,7 @@ static PREFER_CONSTEXPR char ver_str[] = "PLINK v2.0.0-a.7.1.a.mod"
 #elif defined(USE_AOCL)
   " AMD"
 #endif
-  " (3 Jul 2026)";
+  " (6 Jul 2026)";
 static PREFER_CONSTEXPR char ver_str2[] =
   // include leading space if day < 10, so character length stays the same
   " "
@@ -119,7 +119,7 @@ static PREFER_CONSTEXPR char ver_str2[] =
 #endif
 
   "   cog-genomics.org/plink/2.0/\n"
-  "(C) 2005-2026 Shaun Purcell, Christopher Chang    GNU General Public License v3\n"
+  "(C) 2005-2026 Shaun Purcell, Christopher Chang      GNU General Public License v3\n"
   "MODIFIED by ExeterGenetics team to enable genotype-qc and non-ref priority merge\n";
 #ifdef HAS_CONSTEXPR
 static_assert(CompileTimeSlen(ver_str) + CompileTimeSlen(ver_str2) == 245, "ver_str/ver_str2 must be updated");
@@ -369,6 +369,10 @@ typedef struct Plink2CmdlineStruct {
 
   // .log should show where --chr, --exclude-if-info, etc. are applied
   LoadFilterLogFlags load_filter_log_flags;
+
+  // lone flag from ImportFlags required to change error to warning
+  // when filters applied here remove all remaining variants
+  uint32_t vcf_allow_no_vars;
 
   Command1Flags command_flags1;
   PvarPsamFlags pvar_psam_flags;
@@ -2484,6 +2488,12 @@ PglErr Plink2Core(const Plink2Cmdline* pcp, MakePlink2Flags make_plink2_flags, c
       if (pcp->filter_flags & kfFilterPvarReq) {
         if (unlikely(!variant_ct)) {
           // do we want this to be conditionally acceptable?
+          // in case of --vcf-allow-no-vars, yes we do
+          if (pcp->vcf_allow_no_vars) {
+            logerrputs("Warning: No variants remaining after main filters.  No output generated\n(--vcf-allow-no-vars).\n");
+            reterr = kPglRetSuccess;
+            goto Plink2Core_ret_1;
+          }
           logerrputs("Error: No variants remaining after main filters.\n");
           goto Plink2Core_ret_DEGENERATE_DATA;
         }
@@ -3594,6 +3604,7 @@ int main(int argc, char** argv) {
   Plink2Cmdline pc;
   pc.filter_flags = kfFilter0;
   pc.dependency_flags = kfFilter0;
+  pc.vcf_allow_no_vars = 0;
   pc.load_filter_log_flags = kfLoadFilterLog0;
   pc.pginame = nullptr;
   pc.var_filter_exceptions_flattened = nullptr;
@@ -13507,6 +13518,8 @@ int main(int argc, char** argv) {
         // permitted here
         pc.dependency_flags |= kfFilterNoSplitChr;
       }
+
+      pc.vcf_allow_no_vars = (import_flags / kfImportVcfAllowNoVars) & 1;
 
       BLAS_SET_NUM_THREADS(1);
       reterr = Plink2Core(&pc, make_plink2_flags, pgenname, psamname, pvarname, outname, outname_end, king_cutoff_fprefix, &chr_info, &main_sfmt);
