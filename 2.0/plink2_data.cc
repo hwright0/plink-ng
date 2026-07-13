@@ -6778,6 +6778,13 @@ THREAD_FUNC_DECL MakePgenThread(void* raw_arg) {
       uintptr_t* read_patch_10_set = nullptr;
       AlleleCode* read_patch_10_vals = nullptr;
       if (is_mhc) {
+        if (read_allele_ct <= 2) {
+          // [DIAG] chr22 split segfault: an mhc record reached the writer with
+          // read_allele_ct<=2.  Print full context before the assert aborts so
+          // the offending output record is identifiable from a shard run.
+          fprintf(stderr, "\n[DIAG] is_mhc with read_allele_ct=%u write_idx=%u variant_idx_offset=%u loaded_vrtype=0x%02x write_allele_ct=%u\n", read_allele_ct, write_idx, variant_idx_offset, loaded_vrtype, write_allele_ct);
+          fflush(stderr);
+        }
         assert(read_allele_ct > 2);
         read_rare01_ct = cur_vrec_end[0];
         read_rare10_ct = cur_vrec_end[1];
@@ -7824,6 +7831,12 @@ PglErr MakePgenRobust(const uintptr_t* sample_include, const uint32_t* new_sampl
           uintptr_t* loadbuf_iter = cur_loadbuf;
           unsigned char* cur_loaded_vrtypes = ctx.loaded_vrtypes[parity];
           AlleleCode* cur_loaded_allele_cts = ctx.loaded_allele_cts[parity];
+          // [DIAG] chr22 split segfault: poison this batch's vrtype slots so an
+          // unwritten slot (a synthesis bookkeeping gap) is recognizable as
+          // 0xff in the writer thread, vs. a genuine pass-through vrtype.
+          if (cur_loaded_vrtypes) {
+            memset(cur_loaded_vrtypes, 0xff, cur_batch_size);
+          }
           ctx.loadbuf_thread_starts[parity][0] = loadbuf_iter;
           if (write_allele_idx_offsets) {
             cur_write_allele_idx_offsets = &(write_allele_idx_offsets[read_batch_idx * write_block_size]);
@@ -7858,6 +7871,14 @@ PglErr MakePgenRobust(const uintptr_t* sample_include, const uint32_t* new_sampl
               if (unlikely(reterr)) {
                 PgenErrPrintNV(reterr, read_variant_uidx);
                 goto MakePgenRobust_ret_1;
+              }
+              // [DIAG] chr22 split segfault: detect a record that is
+              // multiallelic in the pgen (mhc vrtype bit 0x08) but is being
+              // passed through as if biallelic.  This is the exact condition
+              // that makes MakePgenThread() hit `assert(read_allele_ct > 2)`.
+              if (cur_loaded_vrtypes && (cur_loaded_vrtypes[block_widx] & 0x08)) {
+                fprintf(stderr, "\n[DIAG] pass-through mhc record: read_variant_uidx=%u cur_read_allele_ct=%u cur_write_allele_ct=%u vrtype=0x%02x block_widx=%u write_aidx=%u\n", read_variant_uidx, cur_read_allele_ct, cur_write_allele_ct, cur_loaded_vrtypes[block_widx], block_widx, write_aidx);
+                fflush(stderr);
               }
               ++block_widx;
               continue;
