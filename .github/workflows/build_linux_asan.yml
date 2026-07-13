@@ -1,0 +1,70 @@
+name: Build plink2 (Linux AVX2, AddressSanitizer)
+
+# Produces an AddressSanitizer-instrumented AVX2 plink2 binary for debugging
+# memory errors (e.g. the chr22 multiallelic-split segfault) on a Linux instance
+# where the offending data lives.  Unlike the portable release build, this is NOT
+# fully static: ASan is incompatible with a fully-static glibc link.  Instead we:
+#   * drop BLAS/LAPACK entirely (NO_LAPACK=1) -- not needed for import/QC/convert,
+#     and it removes the biggest set of shared-library dependencies;
+#   * bundle zstd from source (Makefile default, STATIC_ZSTD);
+#   * statically link the ASan runtime, libstdc++ and libgcc, so the target
+#     instance only needs glibc (>= this runner's) and the ubiquitous libz.so.1.
+#
+# The AddressSanitizer report it prints on a fault (faulting function, file:line,
+# read/write, access size, and stack) contains NO genotype data and is safe to
+# copy off the instance.
+#
+# Usage on the Linux instance:
+#   chmod +x plink2_asan
+#   ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+#     ./plink2_asan --vcf <shard> ... --make-pgen multiallelics=- --out <out> ...
+# Keep this UNSTRIPPED binary around; if a frame shows only an offset, resolve it
+# with:  addr2line -e plink2_asan -f -C <offset>
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-asan:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          # zlib is the only external shared dep once NO_LAPACK drops BLAS/LAPACK.
+          sudo apt-get install -y build-essential zlib1g-dev
+
+      - name: Build (AVX2, AddressSanitizer, no LAPACK)
+        working-directory: 2.0/build_dynamic
+        run: |
+          make clean
+          # DEBUG flows into both compile (BASEFLAGS) and link (LINKFLAGS), so it
+          # is the clean injection point for -fsanitize=address.  We override
+          # LINKFLAGS to also bundle the ASan/stdc++/gcc runtimes statically and
+          # to keep the dynamic -lz that NO_LAPACK's empty BLASFLAGS would drop.
+          make \
+            NO_LAPACK=1 \
+            DEBUG="-g -fsanitize=address -fno-omit-frame-pointer" \
+            LINKFLAGS="-lm -lpthread -lz -g -fsanitize=address -static-libasan -static-libstdc++ -static-libgcc"
+          mv plink2 plink2_asan
+
+      - name: Show dependencies and self-test
+        working-directory: 2.0/build_dynamic
+        run: |
+          file plink2_asan
+          ldd plink2_asan || true
+          ASAN_OPTIONS=detect_leaks=0 ./plink2_asan --version
+
+      - name: Smoke test under ASan (dummy split, exercises the crash path shape)
+        working-directory: 2.0/build_dynamic
+        run: |
+          ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+            ./plink2_asan --dummy 200 100 --make-pgen multiallelics=- --out asan_smoke
+
+      - name: Upload ASan binary (unstripped)
+        uses: actions/upload-artifact@v4
+        with:
+          name: plink2-linux-avx2-asan-x86_64
+          path: 2.0/build_dynamic/plink2_asan
