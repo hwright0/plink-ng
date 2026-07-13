@@ -50,8 +50,8 @@ jobs:
         run: |
           make clean
           make \
-            BLASFLAGS="-static -Wl,--start-group -llapacke -llapack -lopenblas -lgfortran -lquadmath -lz -lm -lpthread -ldl -Wl,--end-group" \
-            LINKFLAGS=" "
+            BLASFLAGS="-Wl,-Bstatic -Wl,--start-group -llapacke -llapack -lopenblas -Wl,--end-group -lgfortran -lquadmath -lz -Wl,-Bdynamic -static-libstdc++ -static-libgcc"
+            LINKFLAGS="-lm -lpthread -ldl"
 
       - name: Strip debug symbols
         working-directory: 2.0/build_dynamic
