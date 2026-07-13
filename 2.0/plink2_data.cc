@@ -6778,13 +6778,6 @@ THREAD_FUNC_DECL MakePgenThread(void* raw_arg) {
       uintptr_t* read_patch_10_set = nullptr;
       AlleleCode* read_patch_10_vals = nullptr;
       if (is_mhc) {
-        if (read_allele_ct <= 2) {
-          // [DIAG] chr22 split segfault: an mhc record reached the writer with
-          // read_allele_ct<=2.  Print full context before the assert aborts so
-          // the offending output record is identifiable from a shard run.
-          fprintf(stderr, "\n[DIAG] is_mhc with read_allele_ct=%u write_idx=%u variant_idx_offset=%u loaded_vrtype=0x%02x write_allele_ct=%u\n", read_allele_ct, write_idx, variant_idx_offset, loaded_vrtype, write_allele_ct);
-          fflush(stderr);
-        }
         assert(read_allele_ct > 2);
         read_rare01_ct = cur_vrec_end[0];
         read_rare10_ct = cur_vrec_end[1];
@@ -7767,6 +7760,17 @@ PglErr MakePgenRobust(const uintptr_t* sample_include, const uint32_t* new_sampl
       if (ulii > MINV(kPglVblockSize, write_variant_ct)) {
         ulii = MINV(kPglVblockSize, write_variant_ct);
       }
+      // Debug/test hook: PLINK2_MSPLIT_MAX_BLOCK forces a smaller write-block
+      // size so multiallelic splits that straddle a batch boundary can be
+      // exercised on small test files.  It only shrinks the batch (never
+      // affects output), so it is safe to leave compiled in.
+      const char* msplit_max_block_env = getenv("PLINK2_MSPLIT_MAX_BLOCK");
+      if (msplit_max_block_env) {
+        const uint32_t msplit_max_block = S_CAST(uint32_t, atoi(msplit_max_block_env));
+        if (msplit_max_block && (msplit_max_block < ulii)) {
+          ulii = msplit_max_block;
+        }
+      }
       const uint32_t write_block_size = ulii;
       uintptr_t* main_loadbufs[2];
       main_loadbufs[0] = S_CAST(uintptr_t*, bigstack_alloc_raw_rd(load_variant_vec_ct * kBytesPerVec * write_block_size));
@@ -7831,12 +7835,6 @@ PglErr MakePgenRobust(const uintptr_t* sample_include, const uint32_t* new_sampl
           uintptr_t* loadbuf_iter = cur_loadbuf;
           unsigned char* cur_loaded_vrtypes = ctx.loaded_vrtypes[parity];
           AlleleCode* cur_loaded_allele_cts = ctx.loaded_allele_cts[parity];
-          // [DIAG] chr22 split segfault: poison this batch's vrtype slots so an
-          // unwritten slot (a synthesis bookkeeping gap) is recognizable as
-          // 0xff in the writer thread, vs. a genuine pass-through vrtype.
-          if (cur_loaded_vrtypes) {
-            memset(cur_loaded_vrtypes, 0xff, cur_batch_size);
-          }
           ctx.loadbuf_thread_starts[parity][0] = loadbuf_iter;
           if (write_allele_idx_offsets) {
             cur_write_allele_idx_offsets = &(write_allele_idx_offsets[read_batch_idx * write_block_size]);
@@ -7871,14 +7869,6 @@ PglErr MakePgenRobust(const uintptr_t* sample_include, const uint32_t* new_sampl
               if (unlikely(reterr)) {
                 PgenErrPrintNV(reterr, read_variant_uidx);
                 goto MakePgenRobust_ret_1;
-              }
-              // [DIAG] chr22 split segfault: detect a record that is
-              // multiallelic in the pgen (mhc vrtype bit 0x08) but is being
-              // passed through as if biallelic.  This is the exact condition
-              // that makes MakePgenThread() hit `assert(read_allele_ct > 2)`.
-              if (cur_loaded_vrtypes && (cur_loaded_vrtypes[block_widx] & 0x08)) {
-                fprintf(stderr, "\n[DIAG] pass-through mhc record: read_variant_uidx=%u cur_read_allele_ct=%u cur_write_allele_ct=%u vrtype=0x%02x block_widx=%u write_aidx=%u\n", read_variant_uidx, cur_read_allele_ct, cur_write_allele_ct, cur_loaded_vrtypes[block_widx], block_widx, write_aidx);
-                fflush(stderr);
               }
               ++block_widx;
               continue;
@@ -8099,7 +8089,16 @@ PglErr MakePgenRobust(const uintptr_t* sample_include, const uint32_t* new_sampl
                   genovec[widx] = Word11(genovec[widx]) * 3;
                 }
               }
-              const uint32_t split_stop = MINV(cur_batch_size + 1 - block_widx, cur_read_allele_ct);
+              // The number of records still writable in this batch is
+              // (cur_batch_size - block_widx); the write loop below advances
+              // write_aidx from its current value, so the allele-index cap that
+              // fills exactly that many slots is (cur_batch_size - block_widx +
+              // write_aidx).  The old "+ 1" form assumed write_aidx == 1 and,
+              // when a split resumes after a batch boundary (write_aidx > 1),
+              // undershot by (write_aidx - 1), leaving that many vrtype/genotype
+              // slots unwritten -- which the writer thread then read as garbage
+              // (segfault, or the read_allele_ct>2 assert).
+              const uint32_t split_stop = MINV(cur_batch_size - block_widx + write_aidx, cur_read_allele_ct);
               for (; write_aidx != split_stop; ++write_aidx, ++block_widx) {
                 // 3. synthesize raw
                 //   (save to loaded_vrtypes if necessary)

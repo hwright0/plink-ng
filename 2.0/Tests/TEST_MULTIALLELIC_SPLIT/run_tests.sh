@@ -38,3 +38,24 @@ $1/plink2 $2 $3 --pfile plink2_split --export vcf --out plink2_split
 # records, which carry the split genotypes and phase.
 grep -v '^#' plink2_split.vcf > plink2_split_data.txt
 diff -q plink2_split_data.txt split_test.want.txt
+
+# Fourth bug (chr22 srWGS): a multiallelic split whose output records straddle a
+# write-batch boundary.  When the split resumed in the next batch (write_aidx >
+# 1), the split_stop cap in MakePgenRobust() was computed as
+# (cur_batch_size + 1 - block_widx), which assumes write_aidx == 1 and undershot
+# by (write_aidx - 1).  That left that many per-record vrtype/genotype slots
+# unwritten; the writer thread then read uninitialized data, producing either a
+# segfault or the `read_allele_ct > 2` assertion right at the end of the .pgen
+# write (99%).  It only surfaced when a variant's split crossed into the final,
+# smaller batch, so it was data/size dependent.
+#
+# PLINK2_MSPLIT_MAX_BLOCK shrinks the write-block size (batch never affects
+# output), forcing these same sites to straddle boundaries on tiny test files.
+# The split must still reproduce split_test.want.txt exactly for every block
+# size.
+for msplit_max_block in 1 2 3 4; do
+  PLINK2_MSPLIT_MAX_BLOCK=${msplit_max_block} $1/plink2 $2 $3 --vcf split_test.vcf --double-id --make-pgen multiallelics=- --out plink2_split_b${msplit_max_block}
+  $1/plink2 $2 $3 --pfile plink2_split_b${msplit_max_block} --export vcf --out plink2_split_b${msplit_max_block}
+  grep -v '^#' plink2_split_b${msplit_max_block}.vcf > plink2_split_b${msplit_max_block}_data.txt
+  diff -q plink2_split_b${msplit_max_block}_data.txt split_test.want.txt
+done
